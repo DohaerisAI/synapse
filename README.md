@@ -1,88 +1,246 @@
-# Agent Runtime MVP
+<p align="center">
+  <img src="assets/logo.png" alt="Synapse" width="200" />
+</p>
 
-A Python agent runtime for a personal assistant first, designed so it can later become a professional agent platform for workflows like customer support, marketing operations, research, and internal tooling.
+<h1 align="center">Synapse</h1>
 
-## Overall idea
-This project is not just a chatbot wrapper. It is a small agent platform with explicit system boundaries:
+<p align="center">
+  <strong>An agent runtime that doesn't just respond. It remembers, reasons, and evolves.</strong>
+</p>
 
-- adapters receive messages from external channels like Telegram
-- a gateway normalizes inbound events and routes them into sessions
-- a session state machine controls how each run moves from intake to response
-- a capability broker decides what the agent is allowed to do
-- execution can happen on the host or in Docker depending on risk
-- Markdown memory stores durable notes and summaries in a human-readable form
-- SQLite stores operational state such as runs, approvals, events, and adapter health
-- operators manage the system through a web console and a simple TUI
+<p align="center">
+  <a href="#quickstart"><img src="https://img.shields.io/badge/quickstart-4%20commands-brightgreen?style=flat-square" /></a>
+  <a href="#architecture"><img src="https://img.shields.io/badge/architecture-explicit%20state%20machines-blue?style=flat-square" /></a>
+  <a href="#the-evolution-thesis"><img src="https://img.shields.io/badge/vision-self--improving-ff69b4?style=flat-square" /></a>
+  <img src="https://img.shields.io/badge/python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white" />
+  <img src="https://img.shields.io/badge/license-private-lightgrey?style=flat-square" />
+</p>
 
-## MVP goals
-- Telegram based input
-- Codex CLI auth reuse for OpenAI Codex access
-- Azure OpenAI API support for `gpt-5.2-chat`
-- approval-gated execution for risky actions
-- controlled self-improvement via integration registry, staging, approval, and startup bootstrap
-- docs and checklists kept current as implementation progresses
+---
 
-## Why this shape
-OpenClaw and NanoClaw both have useful ideas, but this project is aiming for a clearer runtime model:
+> **Most AI assistants are stateless prompt wrappers.**
+> Send a message, get a response, forget everything.
+> No memory. No approvals. No safety rails. No real tools.
+>
+> Synapse is what happens when you stop building chatbots and start building runtimes.
 
-- OpenClaw contributes the gateway, adapter, auth-profile, and skills ideas
-- NanoClaw contributes the emphasis on smaller, understandable runtime boundaries
-- this repo adds explicit state machines, capability brokerage, Markdown-first memory, and operator-first observability in a Python-first service
+---
 
-## Source of truth
-Start here, then see:
+## What is Synapse?
 
-- `docs/architecture/overview.md`
-- `docs/checklists/implementation-checklist.md`
-- `docs/checklists/test-checklist.md`
+Synapse is an async Python agent runtime that treats your AI assistant like a **real system** — with session state machines, capability-gated execution, durable memory, and human-in-the-loop approval flows.
 
-## Current implementation
-- Python package under `agent_runtime/`
-- FastAPI app with inbound, health, approvals, runs, and skills endpoints
-- Telegram webhook normalization plus optional outbound send when `TELEGRAM_BOT_TOKEN` is configured
-- Google Workspace bridge via `gws` for Gmail, Calendar, Drive, Docs, and Sheets
-- SQLite operational state for runs, run events, queued events, approvals, and adapter health
-- Markdown/JSONL memory under `memory/`
-- local skill loading from `skills/<skill-id>/`
-- integration registry under `integrations/` with propose/scaffold/test/apply flow
-- `BOOT.md` startup activation for approved integrations
-- auth resolution order: local profiles, Codex CLI auth reuse, environment variables, config fallback
-- minimal web console pages under `/console`
-- rich Textual TUI via `agent-runtime tui`
-- setup flow via `agent-runtime onboard`, `agent-runtime configure`, and `agent-runtime doctor`
-- live Telegram account verification is in place
+It connects to Telegram (more channels coming), talks to Google Workspace (Gmail, Calendar, Drive, Docs, Sheets), and runs on your machine with a web console and TUI for full operator visibility.
 
-## Local run
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e .
-agent-runtime onboard
-agent-runtime serve
+```
+You: "What's on my calendar today?"
+Synapse: [plans] → [checks capabilities] → [executes GWS query] → [formats response]
+         All tracked. All auditable. All approvable.
 ```
 
-## Runtime env
-- `TELEGRAM_BOT_TOKEN`: Telegram bot token for outbound replies
-- `TELEGRAM_POLLING_ENABLED=1`: enables local Telegram polling instead of relying only on webhooks
-- `TELEGRAM_POLL_INTERVAL`: backoff interval after polling errors
-- `AGENT_EXTRA_INSTRUCTIONS`: extra runtime instructions appended to the main assistant prompt
-- `GWS_ENABLED=1`: enables the Google Workspace bridge
-- `GWS_BINARY=gws`: path or command name for the Google Workspace CLI
-- `GWS_ALLOWED_SERVICES=gmail,calendar,drive,docs,sheets`: service allowlist
-- `GWS_PLANNER_EXTRA_INSTRUCTIONS`: extra instructions appended to the GWS skill-planning prompt
-- `CODEX_AUTH_FILE`: optional override for Codex auth file discovery
+## Why Synapse Exists
 
-Start from `.env.example` and export the values you actually want to use.
+We studied the best and took what worked:
 
-## Operator use
-- Web console: `http://127.0.0.1:8000/console`
-- TUI: `agent-runtime tui`
+| | OpenClaw | NanoClaw | **Synapse** |
+|---|---------|----------|-------------|
+| Runtime model | Implicit | Minimal | **Explicit state machine** |
+| Safety | Basic | None | **Capability broker + approval gates** |
+| Memory | In-context | Session-only | **Durable markdown** (session / user / global) |
+| Observability | Logs | Logs | **Web console + TUI + heartbeat** |
+| Extensibility | Plugin store | Hardcoded | **Plugin SDK** (skills / channels / hooks) |
+| Self-improvement | Manual | None | **Integration lifecycle** (propose / test / approve / activate) |
 
-When Telegram polling is enabled, the runtime can receive Telegram messages locally without a public webhook URL.
-The TUI can also edit `.env.local`, reload the runtime, and approve pending actions.
-All Google Workspace actions are approval-gated, including reads. Use `/gws status`, `/gws gmail search ...`, `/gws calendar agenda`, `/gws drive search ...`, `/gws docs write ...`, and `/gws sheets read|append ...`.
-Natural Workspace prompts are also supported now for common flows such as `my last mail`, `what's on my calendar today`, `prep me for my next meeting`, and `search my drive for budget`. If the agent replies that a Workspace action is waiting for approval, replying `yes`, `approve`, or `go ahead` in the same chat will approve it.
+Not a fork. Not a wrapper. A ground-up rethink of what an agent runtime should be.
+
+## Quickstart
+
+```bash
+git clone https://github.com/mainadwitiya/synapse.git
+cd synapse
+python3 -m venv .venv && .venv/bin/pip install -e .
+synapse onboard
+synapse serve
+```
+
+Open **http://127.0.0.1:8000/console** — you're live.
+
+## Architecture
+
+```
+                    Telegram / API / Webhook
+                            |
+                    [ Channel Adapter ]
+                     normalize inbound
+                            |
+                      [ Gateway ]
+               session lookup + context build
+                            |
+                     [ Planner ]
+              decompose intent into actions
+                            |
+                  [ Capability Broker ]
+             safe? risky? needs approval?
+                     /            \
+                 [ Host ]      [ Isolated ]
+                Executor        Executor
+                     \            /
+                  [ State Machine ]
+        RECEIVED → PLANNED → EXECUTING → COMPLETED
+                            |
+               +-----------+-----------+
+               |                       |
+        [ Memory Store ]        [ SQLite Store ]
+        markdown files          runs, events,
+        session / user /        approvals,
+        global notes            adapter health
+```
+
+**Design philosophy:**
+- Explicit state machines over implicit conversation flow
+- Approval gates over "just do it" autonomy
+- Markdown memory over opaque vector stores
+- Plugin-first over monolithic features
+- Operator observability over black-box execution
+
+## Capabilities
+
+<details>
+<summary><strong>Google Workspace</strong> — Gmail, Calendar, Drive, Docs, Sheets</summary>
+
+Natural language interface to your entire workspace. Ask "prep me for my next meeting" and Synapse will check your calendar, pull relevant Drive docs, and compose a brief.
+
+All workspace actions are **approval-gated**. Synapse asks before it sends, deletes, or modifies.
+
+</details>
+
+<details>
+<summary><strong>Stateful Sessions</strong> — every conversation is a tracked run</summary>
+
+```
+RECEIVED → CONTEXT_BUILT → PLANNED → EXECUTING → RESPONDING → COMPLETED
+                                   ↘ WAITING_APPROVAL ↗
+                                   ↘ WAITING_INPUT ↗
+```
+
+11 states. Explicit transitions. Full audit trail in SQLite.
+
+</details>
+
+<details>
+<summary><strong>Durable Memory</strong> — markdown files that persist across sessions</summary>
+
+Three scopes: **session** (conversation context), **user** (preferences, history), **global** (system knowledge). All stored as human-readable `.md` files you can inspect and edit.
+
+</details>
+
+<details>
+<summary><strong>Plugin Architecture</strong> — skills, channels, and hooks</summary>
+
+Drop a `manifest.json` + `SKILL.md` into `skills/` and Synapse picks it up automatically. 19 bundled skills ship out of the box.
+
+Three plugin kinds: **skills** (capabilities), **channels** (adapters), **hooks** (lifecycle events).
+
+</details>
+
+<details>
+<summary><strong>Operator Dashboard</strong> — web console + TUI</summary>
+
+**Web console** at `/console` — 12 pages: Overview, Runs, Approvals, Auth, GWS, Memory, Workspace, Skills, Integrations, Adapters, Heartbeat, Logs.
+
+**TUI** via `synapse tui` — edit config, approve actions, monitor runs from the terminal.
+
+**Health checks** via `synapse doctor`.
+
+</details>
+
+<details>
+<summary><strong>Proactive Heartbeat</strong> — Synapse checks on things for you</summary>
+
+Configurable periodic checks. Synapse can monitor, summarize, and send you updates unprompted — on your schedule, during your active hours.
+
+</details>
+
+## The Evolution Thesis
+
+Here's where it gets interesting.
+
+Synapse already has an integration lifecycle: **propose** → **scaffold** → **test** → **approve** → **activate**. The agent can suggest new integrations, stage them safely, and activate them after human approval.
+
+The next step — already in the roadmap — is **self-awareness**:
+
+```
+[ Self-Model ]        "I know what I am and what I can do"
+      ↓
+[ Diagnosis ]         "I know what I'm bad at"
+      ↓
+[ Forge ]             "I can write my own plugins to get better"
+      ↓
+[ Evolution Loop ]    "I continuously improve, with you in the loop"
+```
+
+Not AGI hype. Not autonomous chaos. A runtime that identifies its gaps, authors skills to fill them, tests them in a sandbox, and activates them — always with a human gate.
+
+**The agent that builds itself, responsibly.**
+
+## Configuration
+
+```bash
+# Required
+TELEGRAM_BOT_TOKEN=your-bot-token
+
+# Google Workspace
+GWS_ENABLED=1
+GWS_BINARY=gws
+GWS_ALLOWED_SERVICES=gmail,calendar,drive,docs,sheets
+
+# Optional
+TELEGRAM_POLLING_ENABLED=1
+AGENT_EXTRA_INSTRUCTIONS="your custom system prompt"
+```
+
+Config loads from `.env` → `.env.local` → process environment.
+
+## CLI
+
+```bash
+synapse serve       # start the runtime
+synapse tui         # operator terminal UI
+synapse onboard     # interactive setup
+synapse configure   # configuration wizard
+synapse doctor      # health check & diagnostics
+synapse plugins     # list discovered plugins
+```
+
+## Project Structure
+
+```
+synapse/
+  config/          # typed Pydantic schema + env loader
+  gateway/         # 11 decomposed orchestration sub-handlers
+  plugins/         # plugin SDK — discovery, loading, registry
+  channels/        # channel adapters (Telegram first)
+  app.py           # FastAPI with web console
+  runtime.py       # lifecycle, heartbeat, background services
+  broker.py        # capability decisions + approval gating
+  executors.py     # host + isolated execution with SSRF protection
+  memory.py        # markdown-first durable storage
+  store.py         # SQLite — runs, events, approvals, health
+  hooks.py         # lifecycle event hooks
+  skills.py        # skill registry + matching
+skills/            # 19 bundled skills
+tests/             # 90 tests across 16 files
+```
 
 ## Tests
+
 ```bash
 .venv/bin/python -m pytest -q
 ```
+
+---
+
+<p align="center">
+  <strong>Built for operators who want to see what their agent is doing.</strong><br/>
+  <em>Because "trust me bro" is not a safety model.</em>
+</p>
