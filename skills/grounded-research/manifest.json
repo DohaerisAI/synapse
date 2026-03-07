@@ -1,0 +1,6 @@
+{
+  "id": "grounded-research",
+  "name": "Grounded Research",
+  "description": "Handle current-facts questions carefully: distinguish stored knowledge from fetched evidence and avoid bluffing.",
+  "capabilities": ["web.fetch"]
+}

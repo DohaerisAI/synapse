@@ -1,0 +1,6 @@
+{
+  "id": "gws-drive-upload",
+  "name": "gws-drive-upload",
+  "description": "Google Drive: Upload a file with automatic metadata.",
+  "capabilities": ["gws"]
+}

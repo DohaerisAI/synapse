@@ -1,0 +1,6 @@
+{
+  "id": "gws-calendar",
+  "name": "gws-calendar",
+  "description": "Google Calendar: Manage calendars and events.",
+  "capabilities": ["gws"]
+}

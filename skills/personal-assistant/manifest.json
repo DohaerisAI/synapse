@@ -1,0 +1,6 @@
+{
+  "id": "personal-assistant",
+  "name": "Personal Assistant",
+  "description": "Keep replies concise, operational, and grounded in the stored memory and current run state.",
+  "capabilities": ["memory.read", "memory.write", "skills.read"]
+}

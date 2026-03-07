@@ -1,0 +1,6 @@
+{
+  "id": "gws-drive",
+  "name": "gws-drive",
+  "description": "Google Drive: Manage files, folders, and shared drives.",
+  "capabilities": ["gws"]
+}

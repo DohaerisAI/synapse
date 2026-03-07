@@ -1,0 +1,6 @@
+{
+  "id": "gws-workflow",
+  "name": "gws-workflow",
+  "description": "Google Workflow: Cross-service productivity workflows.",
+  "capabilities": ["gws"]
+}

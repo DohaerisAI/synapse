@@ -1,0 +1,6 @@
+{
+  "id": "gws-docs",
+  "name": "gws-docs",
+  "description": "Read and write Google Docs.",
+  "capabilities": ["gws"]
+}

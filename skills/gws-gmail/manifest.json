@@ -1,0 +1,6 @@
+{
+  "id": "gws-gmail",
+  "name": "gws-gmail",
+  "description": "Gmail: Send, read, and manage email.",
+  "capabilities": ["gws"]
+}

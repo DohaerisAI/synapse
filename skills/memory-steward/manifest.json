@@ -1,0 +1,6 @@
+{
+  "id": "memory-steward",
+  "name": "Memory Steward",
+  "description": "Keep durable memory clean, deduplicated, and limited to useful user facts, preferences, and ongoing commitments.",
+  "capabilities": ["memory.read", "memory.write"]
+}

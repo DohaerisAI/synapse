@@ -1,0 +1,6 @@
+{
+  "id": "gws-sheets-append",
+  "name": "gws-sheets-append",
+  "description": "Google Sheets: Append a row to a spreadsheet.",
+  "capabilities": ["gws"]
+}

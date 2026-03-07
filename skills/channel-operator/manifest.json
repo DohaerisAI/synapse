@@ -1,0 +1,6 @@
+{
+  "id": "channel-operator",
+  "name": "Channel Operator",
+  "description": "Shape replies for Telegram and WhatsApp: compact, clear, and easy to act on in chat.",
+  "capabilities": ["telegram.send", "whatsapp.send"]
+}

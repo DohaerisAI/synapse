@@ -1,0 +1,6 @@
+{
+  "id": "gws-sheets",
+  "name": "gws-sheets",
+  "description": "Google Sheets: Read and write spreadsheets.",
+  "capabilities": ["gws"]
+}

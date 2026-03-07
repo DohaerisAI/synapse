@@ -1,0 +1,6 @@
+{
+  "id": "gws-gmail-triage",
+  "name": "gws-gmail-triage",
+  "description": "Gmail: Show unread inbox summary (sender, subject, date).",
+  "capabilities": ["gws"]
+}

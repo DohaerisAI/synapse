@@ -1,0 +1,6 @@
+{
+  "id": "gws-shared",
+  "name": "gws-shared",
+  "description": "gws CLI: Shared patterns for authentication, global flags, and output formatting.",
+  "capabilities": ["gws"]
+}

@@ -1,0 +1,6 @@
+{
+  "id": "gws-calendar-agenda",
+  "name": "gws-calendar-agenda",
+  "description": "Google Calendar: Show upcoming events across all calendars.",
+  "capabilities": ["gws"]
+}

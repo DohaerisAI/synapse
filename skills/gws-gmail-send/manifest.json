@@ -1,0 +1,6 @@
+{
+  "id": "gws-gmail-send",
+  "name": "gws-gmail-send",
+  "description": "Gmail: Send an email.",
+  "capabilities": ["gws"]
+}

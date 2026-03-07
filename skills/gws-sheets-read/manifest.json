@@ -1,0 +1,6 @@
+{
+  "id": "gws-sheets-read",
+  "name": "gws-sheets-read",
+  "description": "Google Sheets: Read values from a spreadsheet.",
+  "capabilities": ["gws"]
+}
