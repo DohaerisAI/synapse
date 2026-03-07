@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+.env
+.env.local
+var/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.claude/
+docs/
+memory/
