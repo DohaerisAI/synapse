@@ -30,6 +30,16 @@ CONFIG_FIELDS = [
     "CODEX_MODEL",
     "CODEX_AUTH_FILE",
     "CODEX_TRANSPORT",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_MODEL",
+    "AZURE_OPENAI_DEPLOYMENT",
+    "AZURE_OPENAI_API_VERSION",
+    "CUSTOM_API_BASE_URL",
+    "CUSTOM_API_KEY",
+    "CUSTOM_API_MODEL",
+    "SERVER_HOST",
+    "SERVER_PORT",
 ]
 
 
@@ -112,6 +122,11 @@ def load_config(root: Path, env: dict[str, str]) -> AppConfig:
         codex_model=env.get("CODEX_MODEL", "gpt-5.4") or "gpt-5.4",
         codex_auth_file=env.get("CODEX_AUTH_FILE", ""),
         codex_transport=env.get("CODEX_TRANSPORT", ""),
+        azure_endpoint=env.get("AZURE_OPENAI_ENDPOINT", ""),
+        azure_api_key=env.get("AZURE_OPENAI_API_KEY", ""),
+        azure_model=env.get("AZURE_OPENAI_MODEL", "gpt-5.2-chat"),
+        azure_deployment=env.get("AZURE_OPENAI_DEPLOYMENT", ""),
+        azure_api_version=env.get("AZURE_OPENAI_API_VERSION", "2024-10-21"),
     )
     app.heartbeat = HeartbeatConfig(
         enabled=_env_bool(env, "HEARTBEAT_ENABLED"),

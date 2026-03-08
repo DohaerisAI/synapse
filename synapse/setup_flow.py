@@ -36,7 +36,12 @@ def doctor_snapshot(root: Path, process_env: dict[str, str]) -> dict[str, Any]:
             "enabled": _env_bool(env, "HEARTBEAT_ENABLED", False),
             "every_minutes": _env_int(env, "HEARTBEAT_EVERY_MINUTES", 10),
         },
-        "port_8000_available": _port_available("127.0.0.1", 8000),
+        "server_host": env.get("SERVER_HOST", "127.0.0.1"),
+        "server_port": _env_int(env, "SERVER_PORT", 8000),
+        "port_available": _port_available(
+            env.get("SERVER_HOST", "127.0.0.1"),
+            _env_int(env, "SERVER_PORT", 8000),
+        ),
     }
 
 
@@ -100,7 +105,8 @@ def render_doctor(snapshot: dict[str, Any]) -> str:
             f"- GWS installed: {'yes' if gws['installed'] else 'no'}",
             f"- GWS auth available: {'yes' if gws['auth_available'] else 'no'}",
             f"- GWS credential source: {gws.get('credential_source', 'none')}",
-            f"- Port 8000 available: {'yes' if snapshot['port_8000_available'] else 'no'}",
+            f"- Server: {snapshot.get('server_host', '127.0.0.1')}:{snapshot.get('server_port', 8000)}",
+            f"- Port available: {'yes' if snapshot.get('port_available', snapshot.get('port_8000_available', False)) else 'no'}",
             f"- Heartbeat: {'enabled' if snapshot['heartbeat']['enabled'] else 'disabled'} every {snapshot['heartbeat']['every_minutes']} min",
         ]
     )
@@ -130,6 +136,16 @@ def _with_defaults(env: dict[str, str]) -> dict[str, str]:
         "CODEX_MODEL": "gpt-5.4",
         "CODEX_AUTH_FILE": "",
         "CODEX_TRANSPORT": "responses",
+        "AZURE_OPENAI_ENDPOINT": "",
+        "AZURE_OPENAI_API_KEY": "",
+        "AZURE_OPENAI_MODEL": "gpt-5.2-chat",
+        "AZURE_OPENAI_DEPLOYMENT": "",
+        "AZURE_OPENAI_API_VERSION": "2024-10-21",
+        "CUSTOM_API_BASE_URL": "",
+        "CUSTOM_API_KEY": "",
+        "CUSTOM_API_MODEL": "",
+        "SERVER_HOST": "127.0.0.1",
+        "SERVER_PORT": "8000",
     }
     for key, default in defaults.items():
         if not values.get(key, "").strip():

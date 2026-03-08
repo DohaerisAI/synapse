@@ -14,6 +14,7 @@ dependencies = [
   "Pillow>=10.4,<12.0",
   "pydantic>=2.8,<3.0",
   "pypdf>=5.4,<6.0",
+  "questionary>=2.0,<3.0",
   "textual>=0.80,<9.0",
   "uvicorn>=0.30,<1.0",
 ]
@@ -22,7 +23,7 @@ dependencies = [
 synapse = "synapse.__main__:main"
 
 [tool.setuptools]
-packages = ["synapse", "synapse.gateway", "synapse.channels", "synapse.channels.telegram", "synapse.config", "synapse.plugins"]
+packages = ["synapse", "synapse.gateway", "synapse.channels", "synapse.channels.telegram", "synapse.config", "synapse.plugins", "synapse.streaming", "synapse.wizard"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static, Switch, TabbedContent, TabPane
 
 from .envfile import CONFIG_FIELDS, write_env_file
@@ -47,141 +47,299 @@ def render_tui(runtime: Any) -> str:
     )
 
 
+# ── Synapse Color Palette ──────────────────────────────────────────────────
+# Deep slate base with electric blue accent, warm orange for actions.
+
+_PALETTE = {
+    "bg":           "#0c1021",   # Deep navy-black
+    "surface":      "#151b2e",   # Card surface
+    "surface_alt":  "#1a2236",   # Elevated surface
+    "border":       "#2a3555",   # Subtle borders
+    "border_focus": "#4f8ff7",   # Focus highlight
+    "text":         "#e4e8f1",   # Primary text
+    "text_muted":   "#7b8ba5",   # Muted text
+    "accent":       "#4f8ff7",   # Electric blue accent
+    "accent_dim":   "#3a6fd8",   # Dimmer accent
+    "success":      "#2dd4a8",   # Teal green
+    "warning":      "#f59e42",   # Warm orange
+    "error":        "#f43f5e",   # Rose red
+    "highlight":    "#6c47ff",   # Purple highlight for selections
+}
+
+
 class RuntimeTuiApp(App[None]):
-    CSS = """
-    Screen {
-        layout: vertical;
-        background: #111111;
-        color: #f2f2f2;
-    }
+    CSS = f"""
+    Screen {{
+        background: {_PALETTE['bg']};
+        color: {_PALETTE['text']};
+    }}
 
-    Header {
-        background: #111111;
-        color: #f2f2f2;
-    }
+    Header {{
+        background: {_PALETTE['surface']};
+        color: {_PALETTE['accent']};
+    }}
 
-    Footer {
-        background: #1b1b1b;
-    }
+    Footer {{
+        background: {_PALETTE['surface']};
+        color: {_PALETTE['text_muted']};
+    }}
 
-    TabbedContent {
-        background: #111111;
-    }
+    TabbedContent {{
+        background: {_PALETTE['bg']};
+    }}
 
-    TabPane {
+    ContentSwitcher {{
+        background: {_PALETTE['bg']};
+    }}
+
+    TabPane {{
         padding: 1 2;
-    }
+        background: {_PALETTE['bg']};
+    }}
 
-    #status-strip {
-        height: 4;
-        border: round #3d3d3d;
-        background: #171717;
-        color: #f6f6f6;
+    Underline > .underline--bar {{
+        color: {_PALETTE['border']};
+    }}
+
+    Underline > .underline--bar .underline--bar-active {{
+        color: {_PALETTE['accent']};
+    }}
+
+    Tab {{
+        color: {_PALETTE['text_muted']};
+        padding: 0 3;
+    }}
+
+    Tab.-active {{
+        color: {_PALETTE['accent']};
+        text-style: bold;
+    }}
+
+    Tab:hover {{
+        color: {_PALETTE['text']};
+    }}
+
+    /* ── Status strip ───────────────────────────── */
+
+    #status-strip {{
+        height: auto;
+        min-height: 4;
+        border: solid {_PALETTE['border']};
+        background: {_PALETTE['surface']};
+        color: {_PALETTE['text']};
         padding: 1 2;
         margin: 0 0 1 0;
-    }
+    }}
 
-    .card {
-        border: round #3a3a3a;
-        background: #171717;
-        color: #f3f3f3;
+    /* ── Cards ───────────────────────────────────── */
+
+    .card {{
+        border: solid {_PALETTE['border']};
+        background: {_PALETTE['surface']};
+        color: {_PALETTE['text']};
         padding: 1 2;
         margin: 0 1 1 0;
         min-height: 8;
-    }
+    }}
 
-    .soft {
-        color: #a7a7a7;
-    }
-
-    .section-title {
-        color: #ffffff;
+    .card-title {{
+        color: {_PALETTE['accent']};
         text-style: bold;
         margin: 0 0 1 0;
-    }
+    }}
 
-    #control-grid {
+    .soft {{
+        color: {_PALETTE['text_muted']};
+    }}
+
+    .section-title {{
+        color: {_PALETTE['accent']};
+        text-style: bold;
+        margin: 0 0 1 0;
+    }}
+
+    /* ── Layout ──────────────────────────────────── */
+
+    #control-grid {{
         height: auto;
-    }
+    }}
 
-    #control-grid > .card {
+    #control-grid > .card {{
         width: 1fr;
-    }
+    }}
 
-    #control-actions {
+    #control-actions {{
         height: auto;
         margin: 0 0 1 0;
-    }
+    }}
 
-    #configure-layout {
+    #configure-layout {{
         layout: vertical;
-    }
+    }}
 
-    .config-section {
-        border: round #333333;
-        background: #151515;
+    /* ── Config sections ─────────────────────────── */
+
+    .config-section {{
+        border: solid {_PALETTE['border']};
+        background: {_PALETTE['surface']};
         padding: 1 2;
         margin: 0 0 1 0;
-    }
+    }}
 
-    .config-row {
+    .config-row {{
         height: auto;
         margin: 0 0 1 0;
-    }
+    }}
 
-    .label {
+    .label {{
         width: 24;
-        color: #d0d0d0;
-    }
+        color: {_PALETTE['text_muted']};
+    }}
 
-    Input {
+    /* ── Inputs ──────────────────────────────────── */
+
+    Input {{
         width: 1fr;
-        background: #101010;
-        border: round #3a3a3a;
-        color: #f5f5f5;
-    }
+        background: {_PALETTE['bg']};
+        border: solid {_PALETTE['border']};
+        color: {_PALETTE['text']};
+    }}
 
-    Switch {
+    Input:focus {{
+        border: solid {_PALETTE['border_focus']};
+    }}
+
+    Switch {{
         margin: 0 0 0 1;
-    }
+    }}
 
-    Button {
+    /* ── Buttons ─────────────────────────────────── */
+
+    Button {{
         margin: 0 1 0 0;
-    }
+        background: {_PALETTE['surface_alt']};
+        color: {_PALETTE['text']};
+        border: solid {_PALETTE['border']};
+        min-width: 14;
+        transition: background 200ms;
+    }}
 
-    #config-status {
+    Button:hover {{
+        background: {_PALETTE['accent_dim']};
+        color: white;
+    }}
+
+    Button:focus {{
+        border: solid {_PALETTE['accent']};
+    }}
+
+    Button.-primary {{
+        background: {_PALETTE['accent_dim']};
+        color: white;
+        border: solid {_PALETTE['accent']};
+    }}
+
+    Button.-primary:hover {{
+        background: {_PALETTE['accent']};
+    }}
+
+    Button.-warning {{
+        background: #7a4a00;
+        color: {_PALETTE['warning']};
+        border: solid {_PALETTE['warning']};
+    }}
+
+    Button.-warning:hover {{
+        background: {_PALETTE['warning']};
+        color: {_PALETTE['bg']};
+    }}
+
+    Button.-error {{
+        background: #5a1020;
+        color: {_PALETTE['error']};
+        border: solid {_PALETTE['error']};
+    }}
+
+    Button.-error:hover {{
+        background: {_PALETTE['error']};
+        color: white;
+    }}
+
+    Button.-success {{
+        background: #0a3a2a;
+        color: {_PALETTE['success']};
+        border: solid {_PALETTE['success']};
+    }}
+
+    Button.-success:hover {{
+        background: {_PALETTE['success']};
+        color: {_PALETTE['bg']};
+    }}
+
+    /* ── Config status ───────────────────────────── */
+
+    #config-status {{
         min-height: 3;
-    }
+        color: {_PALETTE['success']};
+    }}
 
-    #activity-layout {
+    /* ── Activity tables ─────────────────────────── */
+
+    #activity-layout {{
         height: 1fr;
-    }
+    }}
 
-    #runs-panel, #approvals-panel {
+    #runs-panel, #approvals-panel {{
         width: 1fr;
-    }
+    }}
 
-    DataTable {
+    DataTable {{
         height: 1fr;
-        border: round #333333;
-        background: #121212;
-    }
+        border: solid {_PALETTE['border']};
+        background: {_PALETTE['surface']};
+    }}
 
-    #qr-box {
+    DataTable > .datatable--header {{
+        background: {_PALETTE['surface_alt']};
+        color: {_PALETTE['accent']};
+        text-style: bold;
+    }}
+
+    DataTable > .datatable--cursor {{
+        background: {_PALETTE['accent_dim']};
+        color: white;
+    }}
+
+    DataTable > .datatable--hover {{
+        background: {_PALETTE['surface_alt']};
+    }}
+
+    /* ── Scrollbar ───────────────────────────────── */
+
+    * {{
+        scrollbar-background: {_PALETTE['bg']};
+        scrollbar-color: {_PALETTE['border']};
+        scrollbar-color-hover: {_PALETTE['accent_dim']};
+        scrollbar-color-active: {_PALETTE['accent']};
+    }}
+
+    /* ── QR / Help boxes ─────────────────────────── */
+
+    #qr-box {{
         min-height: 18;
         overflow: auto;
-    }
+    }}
 
-    #qr-help {
+    #qr-help {{
         min-height: 6;
-    }
+    }}
     """
 
     BINDINGS = [
         ("q", "quit", "Quit"),
-        ("r", "reload_runtime", "Reload Runtime"),
-        ("s", "save_config", "Save Config"),
-        ("a", "approve_selected", "Approve Selected"),
+        ("r", "reload_runtime", "Reload"),
+        ("s", "save_config", "Save"),
+        ("a", "approve_selected", "Approve"),
     ]
 
     def __init__(self, runtime: Any, *, refresh_interval: float = 2.0) -> None:
@@ -191,9 +349,9 @@ class RuntimeTuiApp(App[None]):
         self.root_path = runtime.config.paths.root
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True, icon="[]")
+        yield Header(show_clock=True, icon="[S]")
         with TabbedContent():
-            with TabPane("Control", id="control-pane"):
+            with TabPane("Overview", id="control-pane"):
                 yield Static(id="status-strip")
                 with Horizontal(id="control-grid"):
                     yield Static(id="summary-card", classes="card")
@@ -207,12 +365,12 @@ class RuntimeTuiApp(App[None]):
                 with Horizontal(id="control-actions"):
                     yield Button("Save", id="save-config", variant="primary")
                     yield Button("Reload", id="reload-runtime")
-                    yield Button("Start", id="start-services")
-                    yield Button("Stop", id="stop-services")
-                    yield Button("Approve Selected", id="approve-selected", variant="warning")
+                    yield Button("Start", id="start-services", variant="success")
+                    yield Button("Stop", id="stop-services", variant="error")
+                    yield Button("Approve", id="approve-selected", variant="warning")
                 yield Static(id="config-status", classes="card")
             with TabPane("Configure", id="configure-pane"):
-                with Vertical(id="configure-layout"):
+                with ScrollableContainer(id="configure-layout"):
                     with Vertical(classes="config-section"):
                         yield Label("Identity", classes="section-title")
                         yield self._config_row("Agent name", "AGENT_NAME")
@@ -241,6 +399,22 @@ class RuntimeTuiApp(App[None]):
                         yield self._config_row("Codex model", "CODEX_MODEL")
                         yield self._config_row("Codex auth file", "CODEX_AUTH_FILE")
                         yield self._config_row("Codex transport", "CODEX_TRANSPORT")
+                    with Vertical(classes="config-section"):
+                        yield Label("Azure OpenAI", classes="section-title")
+                        yield self._config_row("Endpoint", "AZURE_OPENAI_ENDPOINT")
+                        yield self._config_row("API key", "AZURE_OPENAI_API_KEY", password=True)
+                        yield self._config_row("Model", "AZURE_OPENAI_MODEL")
+                        yield self._config_row("Deployment", "AZURE_OPENAI_DEPLOYMENT")
+                        yield self._config_row("API version", "AZURE_OPENAI_API_VERSION")
+                    with Vertical(classes="config-section"):
+                        yield Label("Custom API", classes="section-title")
+                        yield self._config_row("Base URL", "CUSTOM_API_BASE_URL")
+                        yield self._config_row("API key", "CUSTOM_API_KEY", password=True)
+                        yield self._config_row("Model", "CUSTOM_API_MODEL")
+                    with Vertical(classes="config-section"):
+                        yield Label("Server", classes="section-title")
+                        yield self._config_row("Host", "SERVER_HOST")
+                        yield self._config_row("Port", "SERVER_PORT")
             with TabPane("Activity", id="activity-pane"):
                 with Horizontal(id="activity-layout"):
                     with Vertical(id="runs-panel"):
@@ -290,95 +464,102 @@ class RuntimeTuiApp(App[None]):
         gws = snapshot["gws"]
         services_note = snapshot.get("background_services_note")
         heartbeat = snapshot["heartbeat"]
+
+        # Status strip with Rich markup
+        provider = resolved_provider(auth)
+        source = resolved_source(auth)
+        tg_status = telegram['status']
+        approvals = health['pending_approvals']
+        queue = health['queued_events']
+        hb = heartbeat_summary(heartbeat)
+        gws_status = f"{'enabled' if gws['enabled'] else 'disabled'} / {'installed' if gws['installed'] else 'missing'}"
+        svc = services_note or ("Services running." if snapshot.get("background_services_owned") else "Services idle.")
+
         self.query_one("#status-strip", Static).update(
-            "\n".join(
-                [
-                    f"Model  {resolved_provider(auth)}   [{resolved_source(auth)}]",
-                    f"Telegram  {telegram['status']}   Approvals  {health['pending_approvals']}   Queue  {health['queued_events']}",
-                    f"Heartbeat  {heartbeat_summary(heartbeat)}",
-                    f"GWS  {'enabled' if gws['enabled'] else 'disabled'} / {'installed' if gws['installed'] else 'missing'}",
-                    services_note or ("Services owned by this process." if snapshot.get("background_services_owned") else "Services are not running in this process."),
-                ]
-            )
+            f"[bold]Model[/]  {provider}  [{source}]    "
+            f"[bold]Telegram[/]  {tg_status}    "
+            f"[bold]Approvals[/]  {approvals}    "
+            f"[bold]Queue[/]  {queue}\n"
+            f"[bold]Heartbeat[/]  {hb}    "
+            f"[bold]GWS[/]  {gws_status}    "
+            f"{svc}"
         )
+
         self.query_one("#summary-card", Static).update(
-            "\n".join(
-                [
-                    "Runtime",
-                    "",
-                    f"Agent name: {snapshot['agent_name']}",
-                    f"Pending approvals: {health['pending_approvals']}",
-                    f"Queued events: {health['queued_events']}",
-                    f"Runs by state: {format_mapping(health['runs_by_state'])}",
-                    f"Heartbeat: {heartbeat_summary(heartbeat)}",
-                    f"Integrations: {len(snapshot.get('integrations', []))}",
-                    f"GWS: {'enabled' if gws['enabled'] else 'disabled'} / {'auth ready' if gws['auth_available'] else 'auth missing'}",
-                ]
-            )
+            "\n".join([
+                "[bold]Runtime[/]",
+                "",
+                f"  Agent: {snapshot['agent_name']}",
+                f"  Pending approvals: {health['pending_approvals']}",
+                f"  Queued events: {health['queued_events']}",
+                f"  Runs: {format_mapping(health['runs_by_state'])}",
+                f"  Heartbeat: {heartbeat_summary(heartbeat)}",
+                f"  Integrations: {len(snapshot.get('integrations', []))}",
+            ])
         )
+
         self.query_one("#auth-card", Static).update(
-            "\n".join(
-                [
-                    "Auth",
-                    "",
-                    f"Resolved: {resolved_provider(auth)}",
-                    f"Source: {resolved_source(auth)}",
-                    f"Transport: {resolved_transport(auth)}",
-                    f"Local profiles: {auth['sources']['local_profiles']['count']}",
-                    f"Codex CLI: {'yes' if auth['sources']['codex_cli']['available'] else 'no'}",
-                ]
-            )
+            "\n".join([
+                "[bold]Auth[/]",
+                "",
+                f"  Provider: {resolved_provider(auth)}",
+                f"  Source: {resolved_source(auth)}",
+                f"  Transport: {resolved_transport(auth)}",
+                f"  Local profiles: {auth['sources']['local_profiles']['count']}",
+                f"  Codex CLI: {'yes' if auth['sources']['codex_cli']['available'] else 'no'}",
+            ])
         )
+
         self.query_one("#adapter-card", Static).update(
-            "\n".join(
-                [
-                    "Channels",
-                    "",
-                    f"Telegram: {telegram['status']} polling={telegram['polling_enabled']}",
-                    "Only Telegram is enabled in this build.",
-                ]
-            )
+            "\n".join([
+                "[bold]Channels[/]",
+                "",
+                f"  Telegram: {telegram['status']}",
+                f"  Polling: {'on' if telegram['polling_enabled'] else 'off'}",
+                f"  Configured: {'yes' if telegram['configured'] else 'no'}",
+            ])
         )
+
         self.query_one("#skill-card", Static).update(
-            "Skills\n\n" + ("\n".join(snapshot["skills"]) if snapshot["skills"] else "none")
+            "[bold]Skills[/]\n\n" + (
+                "\n".join(f"  {s}" for s in snapshot["skills"])
+                if snapshot["skills"] else "  none"
+            )
         )
+
         self.query_one("#gws-card", Static).update(
-            "\n".join(
-                [
-                    "Google Workspace",
-                    "",
-                    f"Enabled: {gws['enabled']}",
-                    f"Installed: {gws['installed']}",
-                    f"Auth: {gws['credential_source']}",
-                    f"Services: {', '.join(gws['allowed_services'])}",
-                ]
-            )
+            "\n".join([
+                "[bold]Google Workspace[/]",
+                "",
+                f"  Enabled: {'yes' if gws['enabled'] else 'no'}",
+                f"  Installed: {'yes' if gws['installed'] else 'no'}",
+                f"  Auth: {gws['credential_source']}",
+                f"  Services: {', '.join(gws['allowed_services'])}",
+            ])
         )
+
         self.query_one("#config-card", Static).update(
-            "\n".join(
-                [
-                    "Files",
-                    "",
-                    f"Root: {self.root_path}",
-                    f"Env file: {self.root_path / '.env.local'}",
-                    f"SQLite: {self.runtime.config.paths.sqlite_path}",
-                ]
-            )
+            "\n".join([
+                "[bold]Files[/]",
+                "",
+                f"  Root: {self.root_path}",
+                f"  Env: .env.local",
+                f"  DB: {self.runtime.config.paths.sqlite_path.name}",
+            ])
         )
+
         self.query_one("#usage-card", Static).update(self._usage_help(telegram))
 
     def _update_integrations(self, snapshot: dict[str, Any]) -> None:
         integrations = snapshot.get("integrations", [])
         self.query_one("#integrations-summary", Static).update(
-            "\n".join(
-                [
-                    "Integrations",
-                    "",
-                    f"Count: {len(integrations)}",
-                    "BOOT.md:",
-                    "\n".join(snapshot.get("boot_tasks", [])) or "none",
-                ]
-            )
+            "\n".join([
+                "[bold]Integrations[/]",
+                "",
+                f"  Count: {len(integrations)}",
+                "  BOOT.md:",
+                "\n".join(f"    {t}" for t in snapshot.get("boot_tasks", [])) or "    none",
+            ])
         )
         table = self.query_one("#integrations-table", DataTable)
         table.clear(columns=False)
@@ -440,7 +621,7 @@ class RuntimeTuiApp(App[None]):
                 values[field] = widget.value
         env_path = Path(self.root_path) / ".env.local"
         write_env_file(env_path, values)
-        self.query_one("#config-status", Static).update(f"Saved {env_path}")
+        self.query_one("#config-status", Static).update(f"Saved to {env_path}")
 
     def action_reload_runtime(self) -> None:
         self.runtime.stop_background_services()
@@ -448,7 +629,7 @@ class RuntimeTuiApp(App[None]):
         self.runtime.start_background_services()
         self._populate_config_inputs()
         self.refresh_view()
-        self.query_one("#config-status", Static).update("Runtime reloaded from environment files.")
+        self.query_one("#config-status", Static).update("Runtime reloaded.")
 
     def action_approve_selected(self) -> None:
         table = self.query_one("#approvals-table", DataTable)
@@ -487,22 +668,15 @@ class RuntimeTuiApp(App[None]):
         )
 
     def _usage_help(self, telegram: dict[str, Any]) -> str:
-        lines = [
-            "How To Test",
+        return "\n".join([
+            "[bold]How To Test[/]",
             "",
-            "Telegram:",
-            "Send a message from any Telegram account to your bot username.",
-            f"Bot configured: {'yes' if telegram['configured'] else 'no'} | polling: {'on' if telegram['polling_enabled'] else 'off'}",
+            "  [bold]Telegram[/]  Send a message from any Telegram account to your bot.",
+            f"  Bot configured: {'yes' if telegram['configured'] else 'no'} | Polling: {'on' if telegram['polling_enabled'] else 'off'}",
             "",
-            "Google Workspace:",
-            "Use /gws status, /gws gmail search ..., /gws calendar agenda, /gws drive search ...,",
-            "or natural requests like 'my last mail' and 'what's on my calendar today'.",
-            "Every GWS action still requires approval, and you can also approve with yes/go ahead in chat.",
-            "",
-            "Channel scope:",
-            "Telegram is the only live channel in this runtime.",
-        ]
-        return "\n".join(lines)
+            "  [bold]Google Workspace[/]  Use /gws status, /gws gmail search ..., or natural language.",
+            "  Every GWS action requires approval. You can also approve with 'yes' / 'go ahead' in chat.",
+        ])
 
 
 def resolved_provider(snapshot: dict[str, Any]) -> str:
