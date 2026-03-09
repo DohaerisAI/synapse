@@ -12,6 +12,35 @@ if TYPE_CHECKING:
     from .providers import ModelRouter
 
 
+def _redact_command(cmd: str) -> str:
+    """Strip PII from GWS CLI commands, keeping only the call structure.
+
+    Replaces --json and --params values with a schema skeleton showing
+    which keys were present but not their values.
+    """
+    def _schema_skeleton(raw: str) -> str:
+        try:
+            obj = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return '"{...}"'
+        return json.dumps(_keys_only(obj), ensure_ascii=True)
+
+    def _keys_only(obj: object) -> object:
+        if isinstance(obj, dict):
+            return {k: _keys_only(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return ["..."] if obj else []
+        return "..."
+
+    # Redact --json '{...}' and --params '{...}'
+    result = re.sub(
+        r"""(--(?:json|params))\s+'([^']*)'""",
+        lambda m: f"{m.group(1)} '{_schema_skeleton(m.group(2))}'",
+        cmd,
+    )
+    return result
+
+
 @dataclass(slots=True)
 class MemorySearchResult:
     source: str
@@ -116,7 +145,8 @@ class MemoryStore:
         if intent:
             lines.append(f"- intent: {intent}")
         if commands:
-            lines.append(f"- commands: {' | '.join(commands)}")
+            redacted = [_redact_command(cmd) for cmd in commands]
+            lines.append(f"- commands: {' | '.join(redacted)}")
         if note:
             lines.append(f"- note: {note}")
         if not lines:
