@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, TYPE_CHECKING
 
 from ..capabilities import DEFAULT_CAPABILITY_REGISTRY
@@ -12,6 +13,10 @@ from ..models import (
     RunState,
     WorkflowPlan,
 )
+
+from ..streaming.sink import StreamSink
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .core import Gateway
@@ -29,11 +34,35 @@ class AgentLoop:
         *,
         prior_results: list[dict[str, Any]] | None = None,
         continuation_text: str | None = None,
+        stream_sink: StreamSink | None = None,
     ) -> GatewayResult:
         gw = self._gw
         execution_results = list(prior_results or [])
         loop_text = continuation_text or event.text
         current_task = gw.memory.read_current_task(run.session_key) or {}
+
+        # Fast path: simple conversational reply with streaming.
+        # When there's no active task, no prior results, and a stream sink,
+        # skip the JSON agent loop and generate plain text directly.
+        is_hb = gw.context_builder.is_heartbeat(event) if stream_sink else False
+        can_stream = (
+            stream_sink is not None
+            and not execution_results
+            and not continuation_text
+            and not is_hb
+        )
+        logger.info(
+            "agent_loop: sink=%s results=%d cont=%s hb=%s → can_stream=%s",
+            stream_sink is not None, len(execution_results),
+            continuation_text is not None, is_hb, can_stream,
+        )
+        if can_stream:
+            result = await self._streaming_reply(run, event, current, stream_sink)
+            logger.info("_streaming_reply returned: %s", result is not None)
+            if result is not None:
+                return result
+            logger.info("streaming fast-path returned None, falling back to JSON loop")
+
         last_workflow = gw._workflow("chat.respond", [], renderer="default")
         for turn in range(1, gw.AGENT_LOOP_MAX_TURNS + 1):
             gw.store.append_run_event(
@@ -42,6 +71,8 @@ class AgentLoop:
                 "model.turn.started",
                 {"turn": turn, "result_count": len(execution_results)},
             )
+            # Don't stream during agent loop JSON turns — model outputs structured
+            # JSON that must be parsed first. Stream the final reply text instead.
             directive = await self._run_turn(run, event, loop_text, execution_results)
             gw.store.append_run_event(
                 run.run_id,
@@ -163,6 +194,52 @@ class AgentLoop:
                 )
         reply_text = "I couldn't finish that request cleanly."
         final_current = gw.state_manager.finalize_reply_text(run, event, current, execution_results, last_workflow, reply_text)
+        return GatewayResult(
+            run_id=run.run_id,
+            session_key=run.session_key,
+            status=final_current.value,
+            reply_text=reply_text,
+        )
+
+    async def _streaming_reply(
+        self,
+        run: RunRecord,
+        event: NormalizedInboundEvent,
+        current: RunState,
+        stream_sink: StreamSink,
+    ) -> GatewayResult | None:
+        """Generate a plain-text streaming reply for simple chat messages.
+
+        Returns None if generation fails, allowing fallback to the JSON loop.
+        """
+        gw = self._gw
+        system_prompt = gw.context_builder.system_prompt(run.session_key, run.user_id, event)
+        attachment_summary = gw.context_builder.attachment_summary(event)
+        attachments = gw.context_builder.attachment_list(event)
+        user_message: dict[str, Any] = {"role": "user", "content": event.text}
+        if attachments:
+            user_message["attachments"] = attachments
+        messages: list[dict[str, Any]] = [user_message]
+        if attachment_summary:
+            messages.append({"role": "system", "content": attachment_summary})
+        gw.store.append_run_event(
+            run.run_id, run.session_key, "model.streaming.started", {"text_length": len(event.text)},
+        )
+        try:
+            reply_text = await gw.model_router.generate_stream(
+                messages, system_prompt=system_prompt, sink=stream_sink,
+            )
+        except Exception as exc:
+            logger.warning("streaming reply failed, falling back to JSON loop: %s", exc, exc_info=True)
+            return None  # Fall back to JSON agent loop
+        if not reply_text:
+            return None
+        reply_text = reply_text.strip()
+        gw.store.append_run_event(
+            run.run_id, run.session_key, "model.streaming.completed", {"reply_length": len(reply_text)},
+        )
+        workflow = gw._workflow("chat.respond", [], renderer="default")
+        final_current = gw.state_manager.finalize_reply_text(run, event, current, [], workflow, reply_text)
         return GatewayResult(
             run_id=run.run_id,
             session_key=run.session_key,

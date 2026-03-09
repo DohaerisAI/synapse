@@ -4,12 +4,15 @@ from datetime import UTC, datetime
 from synapse.auth import AuthStore
 from synapse.broker import CapabilityBroker
 from synapse.capabilities import DEFAULT_CAPABILITY_REGISTRY
+from synapse.diagnosis import DiagnosisEngine
 from synapse.executors import HostExecutor, IsolatedExecutor
 from synapse.gateway import Gateway
 from synapse.gws import GWSBridge
 from synapse.integrations import IntegrationRegistry
+from synapse.introspection import RuntimeIntrospector
 from synapse.memory import MemoryStore
 from synapse.models import NormalizedInboundEvent
+from synapse.plugins.registry import PluginRegistry
 from synapse.providers import ModelRouter
 from synapse.session import SessionStateMachine
 from synapse.skills import SkillRegistry
@@ -18,12 +21,13 @@ from synapse.workspace import WorkspaceStore
 
 
 class FakeModelRouter(ModelRouter):
-    def __init__(self, planner_runner=None, intent_runner=None, loop_runner=None) -> None:
+    def __init__(self, planner_runner=None, intent_runner=None, loop_runner=None, action_planner_runner=None) -> None:
         self._profile = None
         self.last_system_prompt = None
         self.planner_runner = planner_runner
         self.intent_runner = intent_runner
         self.loop_runner = loop_runner
+        self.action_planner_runner = action_planner_runner
         self.system_prompts = []
 
     def resolve_profile(self):  # type: ignore[override]
@@ -36,6 +40,8 @@ class FakeModelRouter(ModelRouter):
             return self.intent_runner(messages, system_prompt=system_prompt)
         if system_prompt and "Google Workspace planning runtime." in system_prompt and self.planner_runner is not None:
             return self.planner_runner(messages, system_prompt=system_prompt)
+        if system_prompt and "Action planning runtime." in system_prompt and self.action_planner_runner is not None:
+            return self.action_planner_runner(messages, system_prompt=system_prompt)
         if system_prompt and "Unified agent loop runtime." in system_prompt and self.loop_runner is not None:
             return self.loop_runner(messages, system_prompt=system_prompt)
         return None
@@ -52,6 +58,7 @@ def build_gateway(
     planner_runner=None,
     intent_runner=None,
     loop_runner=None,
+    action_planner_runner=None,
 ) -> Gateway:
     auth = AuthStore(tmp_path / "auth.json", tmp_path / "config.json", env={})
     memory = MemoryStore(tmp_path / "memory")
@@ -81,12 +88,18 @@ def build_gateway(
     store.initialize()
     integrations = IntegrationRegistry(tmp_path / "integrations", skills_dir=tmp_path / "skills", boot_path=tmp_path / "BOOT.md", env={})
     integrations.initialize()
-    model_router = FakeModelRouter(planner_runner=planner_runner, intent_runner=intent_runner, loop_runner=loop_runner)
+    model_router = FakeModelRouter(planner_runner=planner_runner, intent_runner=intent_runner, loop_runner=loop_runner, action_planner_runner=action_planner_runner)
     if gws_runner is None:
         def gws_runner(command, *, env, cwd, timeout):  # type: ignore[no-redef,no-untyped-def]
             import subprocess
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"ok": True}), stderr="")
     gws = GWSBridge(enabled=True, env={}, workdir=str(tmp_path), runner=gws_runner)  # type: ignore[arg-type]
+    introspector = RuntimeIntrospector(
+        capability_registry=DEFAULT_CAPABILITY_REGISTRY,
+        plugin_registry=PluginRegistry(),
+        skill_registry=skills,
+    )
+    diagnosis_engine = DiagnosisEngine(store=store)
     return Gateway(
         store=store,
         memory=memory,
@@ -102,6 +115,8 @@ def build_gateway(
             gws,
             codex_search_runner=codex_search_runner,
             workdir=str(tmp_path),
+            introspector=introspector,
+            diagnosis_engine=diagnosis_engine,
         ),
         isolated_executor=IsolatedExecutor(),
         model_router=model_router,
@@ -929,3 +944,114 @@ async def test_gateway_supports_explicit_search_command(tmp_path) -> None:
 
     assert result.status == "COMPLETED"
     assert result.reply_text == "searched: latest tesla deliveries"
+
+
+async def test_action_planner_routes_self_describe(tmp_path) -> None:
+    """When the intent router says 'act' and GWS returns None,
+    the action planner should route self-awareness queries to self.* actions."""
+
+    def intent_runner(messages, *, system_prompt=None):  # type: ignore[no-untyped-def]
+        return json.dumps({"mode": "act"})
+
+    def action_planner_runner(messages, *, system_prompt=None):  # type: ignore[no-untyped-def]
+        return json.dumps({
+            "status": "workflow",
+            "intent": "self.describe",
+            "renderer": "default",
+            "actions": [
+                {"action": "self.describe", "payload": {}},
+                {"action": "self.capabilities", "payload": {}},
+            ],
+        })
+
+    gateway = build_gateway(
+        tmp_path,
+        intent_runner=intent_runner,
+        action_planner_runner=action_planner_runner,
+    )
+    result = await gateway.ingest(
+        NormalizedInboundEvent(
+            adapter="telegram",
+            channel_id="chat-1",
+            user_id="user-1",
+            message_id="msg-self",
+            text="What are you and what can you do?",
+        )
+    )
+    assert result.status == "COMPLETED"
+    # The run should have executed self.describe and self.capabilities actions
+    events = gateway.store.list_run_events(result.run_id)
+    action_events = [e for e in events if e["event_type"] == "workflow.step.completed"]
+    assert len(action_events) == 2
+    first_result = action_events[0]["payload"]["result"]
+    assert first_result["action"] == "self.describe"
+    assert first_result["success"] is True
+    assert "Synapse" in first_result["detail"]
+    second_result = action_events[1]["payload"]["result"]
+    assert second_result["action"] == "self.capabilities"
+    assert second_result["success"] is True
+    assert len(second_result["artifacts"]["capabilities"]) > 10
+
+
+async def test_action_planner_routes_diagnosis(tmp_path) -> None:
+    """Action planner routes diagnosis queries to diagnosis.report."""
+
+    def intent_runner(messages, *, system_prompt=None):  # type: ignore[no-untyped-def]
+        return json.dumps({"mode": "act"})
+
+    def action_planner_runner(messages, *, system_prompt=None):  # type: ignore[no-untyped-def]
+        return json.dumps({
+            "status": "workflow",
+            "intent": "diagnosis.report",
+            "renderer": "default",
+            "actions": [{"action": "diagnosis.report", "payload": {}}],
+        })
+
+    gateway = build_gateway(
+        tmp_path,
+        intent_runner=intent_runner,
+        action_planner_runner=action_planner_runner,
+    )
+    result = await gateway.ingest(
+        NormalizedInboundEvent(
+            adapter="telegram",
+            channel_id="chat-1",
+            user_id="user-1",
+            message_id="msg-diag",
+            text="Run a diagnosis on yourself",
+        )
+    )
+    assert result.status == "COMPLETED"
+    events = gateway.store.list_run_events(result.run_id)
+    action_events = [e for e in events if e["event_type"] == "workflow.step.completed"]
+    assert len(action_events) == 1
+    diag_result = action_events[0]["payload"]["result"]
+    assert diag_result["action"] == "diagnosis.report"
+    assert diag_result["success"] is True
+    assert "report" in diag_result["artifacts"]
+
+
+async def test_action_planner_no_match_falls_to_chat(tmp_path) -> None:
+    """When action planner returns no_match, falls through to chat.respond."""
+
+    def intent_runner(messages, *, system_prompt=None):  # type: ignore[no-untyped-def]
+        return json.dumps({"mode": "act"})
+
+    def action_planner_runner(messages, *, system_prompt=None):  # type: ignore[no-untyped-def]
+        return json.dumps({"status": "no_match"})
+
+    gateway = build_gateway(
+        tmp_path,
+        intent_runner=intent_runner,
+        action_planner_runner=action_planner_runner,
+    )
+    result = await gateway.ingest(
+        NormalizedInboundEvent(
+            adapter="telegram",
+            channel_id="chat-1",
+            user_id="user-1",
+            message_id="msg-nomatch",
+            text="tell me a joke about python",
+        )
+    )
+    assert result.status == "COMPLETED"

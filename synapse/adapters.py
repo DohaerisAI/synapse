@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
@@ -10,6 +11,8 @@ import httpx
 
 from .attachments import enrich_attachment
 from .models import NormalizedInboundEvent
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramAdapter:
@@ -62,6 +65,52 @@ class TelegramAdapter:
         )
         response.raise_for_status()
         return response.json()
+
+    def edit_text(self, chat_id: str, message_id: int, text: str) -> dict[str, Any]:
+        if not self.token:
+            raise RuntimeError("telegram bot token is not configured")
+        rendered = self._render_telegram_html(text)
+        response = self.client.post(
+            f"https://api.telegram.org/bot{self.token}/editMessageText",
+            json={"chat_id": chat_id, "message_id": message_id, "text": rendered, "parse_mode": "HTML"},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def send_draft(self, chat_id: str, draft_id: int, text: str) -> dict[str, Any]:
+        """Send or update a draft preview via sendMessageDraft (Bot API 9.5+)."""
+        if not self.token:
+            raise RuntimeError("telegram bot token is not configured")
+        rendered = self._render_telegram_html(text)
+        response = self.client.post(
+            f"https://api.telegram.org/bot{self.token}/sendMessageDraft",
+            json={"chat_id": chat_id, "draft_id": draft_id, "text": rendered, "parse_mode": "HTML"},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def delete_message(self, chat_id: str, message_id: int) -> None:
+        """Delete a message. Best-effort, errors are ignored."""
+        if not self.token:
+            return
+        try:
+            self.client.post(
+                f"https://api.telegram.org/bot{self.token}/deleteMessage",
+                json={"chat_id": chat_id, "message_id": message_id},
+            )
+        except Exception:
+            pass
+
+    def send_typing_action(self, chat_id: str) -> None:
+        if not self.token:
+            return
+        try:
+            self.client.post(
+                f"https://api.telegram.org/bot{self.token}/sendChatAction",
+                json={"chat_id": chat_id, "action": "typing"},
+            )
+        except Exception:
+            pass  # typing indicator is best-effort
 
     def _render_telegram_html(self, text: str) -> str:
         escaped = escape(text)
@@ -149,11 +198,15 @@ class TelegramAdapter:
                     except ValueError:
                         continue
                     if self._inbound_handler is not None:
-                        self._inbound_handler(event)
+                        try:
+                            self._inbound_handler(event)
+                        except Exception:
+                            logger.exception("inbound_handler crashed for update %s", update.get("update_id"))
                 self.last_error = None
                 self._emit_health(status="healthy", auth_required=False, last_error=None)
             except Exception as error:  # pragma: no cover - depends on network/runtime
                 self.last_error = str(error)
+                logger.warning("telegram poll error: %s", error)
                 self._emit_health(status="error", auth_required=False, last_error=self.last_error)
                 time.sleep(self.poll_interval)
 

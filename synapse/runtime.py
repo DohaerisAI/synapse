@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import logging
 import os
 import threading
 import time
@@ -9,14 +10,20 @@ from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 from .adapters import TelegramAdapter
 from .auth import AuthStore
+from .streaming.telegram_stream import TelegramDraftStream
 from .broker import CapabilityBroker
+from .capabilities import DEFAULT_CAPABILITY_REGISTRY
 from .channels import ChannelRegistry
 from .channels.telegram import TelegramPlugin
 from .config import AppConfig, CONFIG_FIELDS, load_config, merged_runtime_env
+from .diagnosis import DiagnosisEngine
 from .executors import HostExecutor, IsolatedExecutor
 from .hooks import HookRunner
+from .introspection import RuntimeIntrospector
 from .plugins import PluginRegistry, discover_plugins, load_all as load_all_plugins
 from .gateway import Gateway
 from .gws import DEFAULT_GWS_ALLOWED_SERVICES, GWSBridge
@@ -48,6 +55,8 @@ class Runtime:
     gws: GWSBridge
     workspace: WorkspaceStore
     env: dict[str, str]
+    introspector: RuntimeIntrospector | None = None
+    diagnosis_engine: DiagnosisEngine | None = None
     background_services_owned: bool = False
     background_services_started: bool = False
     background_services_note: str | None = None
@@ -107,11 +116,44 @@ class Runtime:
         self._release_service_lock()
 
     def handle_telegram_event(self, event) -> None:
-        result = asyncio.run(self.async_handle_telegram_event(event))
+        try:
+            asyncio.run(self.async_handle_telegram_event(event))
+        except Exception:
+            logger.exception("handle_telegram_event crashed for event %s", getattr(event, "message_id", "?"))
+            # Best-effort error reply so user isn't left hanging
+            try:
+                channel_id = getattr(event, "channel_id", "")
+                if channel_id and self.telegram.token:
+                    self.telegram.send_text(channel_id, "Something went wrong processing your message. Please try again.")
+            except Exception:
+                logger.exception("failed to send error reply")
 
     async def async_handle_telegram_event(self, event) -> None:
-        result = await self.gateway.ingest(event)
-        self.deliver_result(result)
+        stream: TelegramDraftStream | None = None
+        if getattr(event, "adapter", None) == "telegram" and self.telegram.token:
+            stream = TelegramDraftStream(self.telegram, getattr(event, "channel_id", ""))
+            await stream.start()  # Typing heartbeat starts immediately
+        try:
+            result = await self.gateway.ingest(event, stream_sink=stream)
+        except Exception:
+            logger.exception("gateway.ingest failed for event %s", getattr(event, "message_id", "?"))
+            if stream is not None:
+                await stream.finalize()
+            raise
+        if stream is not None:
+            await stream.materialize()
+            logger.info(
+                "post-materialize: streamed=%s transport=%s queued=%s reply_len=%d",
+                stream.streamed, stream.transport, result.queued,
+                len(result.reply_text or ""),
+            )
+            if stream.streamed:
+                if result.queued:
+                    self.deliver_result(result)
+            else:
+                self.deliver_result(result)
+        else:
+            self.deliver_result(result)
 
     def deliver_result(self, result) -> None:
         if result.queued or not result.reply_text or getattr(result, "suppress_delivery", False):
@@ -413,6 +455,26 @@ def build_runtime(root: Path | None = None) -> Runtime:
         env=env,
         workdir=str(config.paths.root),
     )
+    telegram = TelegramAdapter(
+        token=config.telegram.bot_token or None,
+        polling_enabled=config.telegram.polling_enabled,
+        poll_interval=config.telegram.poll_interval,
+    )
+    channel_registry = ChannelRegistry()
+    channel_registry.register(TelegramPlugin.create(telegram))
+    plugin_registry = PluginRegistry()
+    plugin_search_paths = [
+        config.paths.root / "plugins",
+        config.paths.root / "extensions",
+    ]
+    discovered = discover_plugins(*plugin_search_paths)
+    load_all_plugins(discovered, plugin_registry)
+    introspector = RuntimeIntrospector(
+        capability_registry=DEFAULT_CAPABILITY_REGISTRY,
+        plugin_registry=plugin_registry,
+        skill_registry=skills,
+    )
+    diagnosis_engine = DiagnosisEngine(store=store)
     gateway = Gateway(
         store=store,
         memory=memory,
@@ -428,6 +490,8 @@ def build_runtime(root: Path | None = None) -> Runtime:
             gws,
             codex_model=config.provider.codex_model,
             workdir=str(config.paths.root),
+            introspector=introspector,
+            diagnosis_engine=diagnosis_engine,
         ),
         isolated_executor=IsolatedExecutor(),
         model_router=model_router,
@@ -437,20 +501,6 @@ def build_runtime(root: Path | None = None) -> Runtime:
         heartbeat_path=config.paths.root / "HEARTBEAT.md",
         hooks=hooks,
     )
-    telegram = TelegramAdapter(
-        token=config.telegram.bot_token or None,
-        polling_enabled=config.telegram.polling_enabled,
-        poll_interval=config.telegram.poll_interval,
-    )
-    channel_registry = ChannelRegistry()
-    channel_registry.register(TelegramPlugin.create(telegram))
-    plugin_registry = PluginRegistry()
-    plugin_search_paths = [
-        config.paths.root / "plugins",
-        config.paths.root / "extensions",
-    ]
-    discovered = discover_plugins(*plugin_search_paths)
-    load_all_plugins(discovered, plugin_registry)
     runtime = Runtime(
         config=config,
         store=store,
@@ -466,6 +516,8 @@ def build_runtime(root: Path | None = None) -> Runtime:
         hooks=hooks,
         gws=gws,
         workspace=workspace,
+        introspector=introspector,
+        diagnosis_engine=diagnosis_engine,
         env=env,
         heartbeat_enabled=config.heartbeat.enabled,
         heartbeat_every_minutes=config.heartbeat.every_minutes,

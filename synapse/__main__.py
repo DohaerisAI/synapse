@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -14,7 +15,20 @@ from .setup_flow import doctor_json, doctor_snapshot, render_doctor
 from .tui import run_tui
 
 
+def _configure_logging() -> None:
+    """Set up root logger so all synapse.* loggers emit to stderr."""
+    root = logging.getLogger("synapse")
+    if not root.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(name)s %(levelname)s %(message)s",
+        ))
+        root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+
 def main() -> None:
+    _configure_logging()
     parser = argparse.ArgumentParser(prog="synapse")
     sub = parser.add_subparsers(dest="command")
 

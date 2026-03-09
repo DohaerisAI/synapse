@@ -10,6 +10,7 @@ import httpx
 from .attachments import attachment_prompt_context
 from .auth import AuthStore
 from .models import AuthProfile
+from .streaming.sink import NullSink, StreamSink
 
 
 class ModelProvider(Protocol):
@@ -40,6 +41,53 @@ class AzureOpenAIProvider:
         response.raise_for_status()
         payload = response.json()
         return payload["choices"][0]["message"]["content"]
+
+    async def generate_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str | None = None,
+        sink: StreamSink | None = None,
+    ) -> str:
+        """Generate with streaming SSE. Push deltas to sink. Return full text."""
+        effective_sink = sink or NullSink()
+        endpoint = self.profile.settings["endpoint"].rstrip("/")
+        deployment = self.profile.settings.get("deployment", self.profile.model)
+        api_version = self.profile.settings.get("api_version", "2024-10-21")
+        url = f"{endpoint}/openai/deployments/{deployment}/chat/completions"
+        request_messages: list[dict[str, Any]] = []
+        if system_prompt:
+            request_messages.append({"role": "system", "content": system_prompt})
+        request_messages.extend(messages)
+        async with self.client.stream(
+            "POST",
+            url,
+            params={"api-version": api_version},
+            headers={"api-key": self.profile.settings["api_key"]},
+            json={"messages": request_messages, "temperature": 0, "stream": True},
+        ) as response:
+            response.raise_for_status()
+            deltas: list[str] = []
+            async for raw_line in response.aiter_lines():
+                line = raw_line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line.partition(":")[2].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                content = choices[0].get("delta", {}).get("content")
+                if isinstance(content, str):
+                    deltas.append(content)
+                    await effective_sink.push(content)
+            full_text = "".join(deltas).strip()
+            return full_text
 
 
 class OpenAICodexResponsesProvider:
@@ -73,6 +121,41 @@ class OpenAICodexResponsesProvider:
         ) as response:
             response.raise_for_status()
             return await self._extract_stream_text(response)
+
+    async def generate_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str | None = None,
+        sink: StreamSink | None = None,
+    ) -> str:
+        """Generate with streaming. Push deltas to sink. Return full text."""
+        effective_sink = sink or NullSink()
+        token = str(
+            self.profile.settings.get("access_token")
+            or self.profile.settings.get("token")
+            or ""
+        ).strip()
+        if not token:
+            raise RuntimeError("openai-codex responses transport requires an access token")
+        endpoint = str(
+            self.profile.settings.get("endpoint", "https://chatgpt.com/backend-api/codex/responses")
+        ).strip()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        account_id = str(self.profile.settings.get("account_id", "") or "").strip()
+        if account_id:
+            headers["ChatGPT-Account-Id"] = account_id
+        async with self.client.stream(
+            "POST",
+            endpoint,
+            headers=headers,
+            json=self._build_payload(messages, system_prompt=system_prompt),
+        ) as response:
+            response.raise_for_status()
+            return await self._extract_stream_text(response, sink=effective_sink)
 
     def _build_payload(
         self,
@@ -139,7 +222,12 @@ class OpenAICodexResponsesProvider:
 
         raise RuntimeError(f"openai-codex responses payload did not include assistant text: {json.dumps(payload)[:400]}")
 
-    async def _extract_stream_text(self, response: httpx.Response) -> str:
+    async def _extract_stream_text(
+        self,
+        response: httpx.Response,
+        *,
+        sink: StreamSink | None = None,
+    ) -> str:
         current_event = ""
         current_data: list[str] = []
         deltas: list[str] = []
@@ -147,7 +235,7 @@ class OpenAICodexResponsesProvider:
             line = raw_line.strip()
             if not line:
                 if current_data:
-                    text = self._consume_sse_event(current_event, current_data, deltas)
+                    text = await self._consume_sse_event(current_event, current_data, deltas, sink=sink)
                     if text is not None:
                         return text
                     current_event = ""
@@ -159,14 +247,21 @@ class OpenAICodexResponsesProvider:
             if line.startswith("data:"):
                 current_data.append(line.partition(":")[2].strip())
         if current_data:
-            text = self._consume_sse_event(current_event, current_data, deltas)
+            text = await self._consume_sse_event(current_event, current_data, deltas, sink=sink)
             if text is not None:
                 return text
         if deltas:
             return "".join(deltas).strip()
         raise RuntimeError("openai-codex responses stream ended without assistant text")
 
-    def _consume_sse_event(self, event: str, data_lines: list[str], deltas: list[str]) -> str | None:
+    async def _consume_sse_event(
+        self,
+        event: str,
+        data_lines: list[str],
+        deltas: list[str],
+        *,
+        sink: StreamSink | None = None,
+    ) -> str | None:
         payload_text = "\n".join(data_lines).strip()
         if not payload_text or payload_text == "[DONE]":
             return "".join(deltas).strip() if deltas else None
@@ -178,6 +273,8 @@ class OpenAICodexResponsesProvider:
             delta = payload.get("delta")
             if isinstance(delta, str):
                 deltas.append(delta)
+                if sink is not None:
+                    await sink.push(delta)
             return None
         if event == "response.completed":
             try:
@@ -277,6 +374,36 @@ class ModelRouter:
             if fallback is None:
                 raise
             return await fallback.generate(messages, system_prompt=system_prompt)
+
+    async def generate_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str | None = None,
+        sink: StreamSink | None = None,
+    ) -> str | None:
+        """Generate with streaming. Push deltas to sink. Return full text."""
+        profile = self.resolve_profile()
+        if profile is None:
+            return None
+        provider = self._provider_for(profile)
+        effective_sink = sink or NullSink()
+        if hasattr(provider, "generate_stream"):
+            try:
+                return await provider.generate_stream(messages, system_prompt=system_prompt, sink=effective_sink)
+            except Exception:
+                fallback = self._fallback_provider_for(profile)
+                if fallback is None:
+                    raise
+                result = await fallback.generate(messages, system_prompt=system_prompt)
+                if result:
+                    await effective_sink.push(result)
+                return result
+        # Provider doesn't support streaming — fall back to non-streaming
+        result = await provider.generate(messages, system_prompt=system_prompt)
+        if result and effective_sink is not None:
+            await effective_sink.push(result)
+        return result
 
     def _provider_for(self, profile: AuthProfile) -> ModelProvider:
         if profile.provider == "azure-openai":
