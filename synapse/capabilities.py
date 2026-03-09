@@ -84,5 +84,10 @@ DEFAULT_CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilityDefinition("memory.delete", "memory", "Delete user/session/global memory entries.", "{scope, content, name?}", user_visible=False),
         CapabilityDefinition("capabilities.read", "system", "List high-level runtime capabilities.", "{}", prompt_visible=False, user_visible=False),
         CapabilityDefinition("shell.exec", "shell", "Run a shell command under runtime policy.", "{command}"),
+        CapabilityDefinition("self.describe", "self", "Describe what Synapse is, its architecture, capabilities, and limitations.", "{}"),
+        CapabilityDefinition("self.health", "self", "Report current health snapshot: run stats, adapter status, pending items.", "{}"),
+        CapabilityDefinition("self.capabilities", "self", "List all registered capabilities and loaded skills.", "{}"),
+        CapabilityDefinition("self.gaps", "self", "Identify known limitations and missing capabilities.", "{}"),
+        CapabilityDefinition("diagnosis.report", "diagnosis", "Analyze recent runs, detect gaps, and suggest improvements.", "{window_hours?: int}"),
     ]
 )

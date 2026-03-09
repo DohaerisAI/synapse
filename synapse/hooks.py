@@ -17,6 +17,7 @@ class HookEventType(StrEnum):
     APPROVAL_RESOLVED = "approval.resolved"
     GATEWAY_STARTED = "gateway.started"
     GATEWAY_STOPPED = "gateway.stopped"
+    DIAGNOSIS_COMPLETED = "diagnosis.completed"
 
 
 class HookRunner:

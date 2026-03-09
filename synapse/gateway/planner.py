@@ -71,6 +71,9 @@ class WorkflowPlanner:
             gws_workflow = await self._extract_gws_workflow(text, session_key=session_key)
             if gws_workflow is not None:
                 return gws_workflow
+            action_workflow = await gw.action_planner.try_plan(text, session_key=session_key)
+            if action_workflow is not None:
+                return action_workflow
         if self._should_use_web_search(text):
             return gw._workflow("web.search", [PlannedAction(action="web.search", payload={"query": text})], renderer="web.search")
         return gw._workflow("chat.respond", [], renderer="default")
@@ -113,6 +116,7 @@ class WorkflowPlanner:
                 "Choose whether the user wants normal conversation or a real-world action.",
                 'Use mode=\"chat\" for drafting, brainstorming, explaining, rewriting, advising, or showing a draft.',
                 'Use mode=\"act\" only when the user wants you to read, fetch, create, update, save, send, delete, verify, or otherwise touch an external system or durable state.',
+                'Use mode=\"act\" when the user asks about the system itself: identity, health, capabilities, gaps, limitations, diagnosis, or architecture.',
                 "Use the current task context when the new message is a short follow-up like yes, no, do it, send it, check it, show proof, make it shorter, or change the ending.",
                 "Do not let domain nouns like email, calendar, docs, or sheets decide by themselves.",
                 "If the current task shows the user is continuing toward a real action, classify as act even if the latest message alone is underspecified.",
@@ -121,7 +125,11 @@ class WorkflowPlanner:
                 "Examples:",
                 '- "draft a mail for Apoorva" -> {"mode":"chat"}',
                 '- "show me the draft first" -> {"mode":"chat"}',
-                '- "tell me about yourself" -> {"mode":"chat"}',
+                '- "tell me about yourself" -> {"mode":"act"}',
+                '- "what are your limitations" -> {"mode":"act"}',
+                '- "run a diagnosis" -> {"mode":"act"}',
+                '- "how are you doing / system health" -> {"mode":"act"}',
+                '- "help me write a poem about cats" -> {"mode":"chat"}',
                 '- "fetch me my last mail" -> {"mode":"act"}',
                 '- "what is on my calendar today" -> {"mode":"act"}',
                 '- "create a sheet and add this row" -> {"mode":"act"}',

@@ -12,10 +12,13 @@ from urllib.parse import urlparse
 import httpx
 
 from .capabilities import DEFAULT_CAPABILITY_REGISTRY
+from .diagnosis import DiagnosisEngine
 from .gws import GWSBridge
 from .integrations import IntegrationRegistry
+from .introspection import RuntimeIntrospector
 from .memory import MemoryStore
-from .models import ExecutionResult, IntegrationStatus, PlannedAction
+from .models import ExecutionResult, IntegrationStatus, PlannedAction, RunState
+from .self_model import Identity
 from .skills import SkillRegistry
 from .store import SQLiteStore
 
@@ -47,6 +50,8 @@ class HostExecutor:
         codex_model: str = "gpt-5.4",
         workdir: str = ".",
         codex_search_runner: Callable[[str], dict[str, Any]] | None = None,
+        introspector: RuntimeIntrospector | None = None,
+        diagnosis_engine: DiagnosisEngine | None = None,
     ) -> None:
         self.memory = memory
         self.skills = skills
@@ -56,6 +61,8 @@ class HostExecutor:
         self.codex_model = codex_model
         self.workdir = workdir
         self.codex_search_runner = codex_search_runner
+        self.introspector = introspector
+        self.diagnosis_engine = diagnosis_engine
 
     async def execute(self, action: PlannedAction, *, session_key: str, user_id: str) -> ExecutionResult:
         if action.action == "memory.read":
@@ -165,7 +172,103 @@ class HostExecutor:
             )
             return ExecutionResult(action=action.action, success=True, detail="reminder scheduled", artifacts={"reminder_id": reminder.reminder_id, "due_at": due_at, "message": message},
             )
+        if action.action == "self.describe":
+            return self._handle_self_describe()
+        if action.action == "self.health":
+            return self._handle_self_health()
+        if action.action == "self.capabilities":
+            return self._handle_self_capabilities()
+        if action.action == "self.gaps":
+            return self._handle_self_gaps()
+        if action.action == "diagnosis.report":
+            return self._handle_diagnosis_report(action.payload)
         return ExecutionResult(action=action.action, success=False, detail="unsupported host action")
+
+    def _handle_self_describe(self) -> ExecutionResult:
+        identity = Identity(
+            name="Synapse",
+            version="0.1.0",
+            purpose="Async Python agent runtime with explicit state machines and approval gates",
+            personality="Calm, practical, concise",
+        )
+        architecture = self.introspector.build_architecture() if self.introspector else None
+        limitations = self.introspector.discover_limitations() if self.introspector else []
+        artifacts: dict[str, Any] = {
+            "identity": identity.model_dump(),
+        }
+        if architecture:
+            artifacts["architecture"] = [c.model_dump() for c in architecture.components]
+        if limitations:
+            artifacts["limitations"] = [lim.model_dump() for lim in limitations]
+        return ExecutionResult(
+            action="self.describe",
+            success=True,
+            detail=f"I am {identity.name}: {identity.purpose}",
+            artifacts=artifacts,
+        )
+
+    def _handle_self_health(self) -> ExecutionResult:
+        runs = self.store.list_runs(limit=200)
+        state_counts: dict[str, int] = {}
+        for run in runs:
+            state_counts[run.state.value] = state_counts.get(run.state.value, 0) + 1
+        total = len(runs)
+        completed = state_counts.get(RunState.COMPLETED.value, 0)
+        failed = state_counts.get(RunState.FAILED.value, 0)
+        failure_rate = failed / total if total > 0 else 0.0
+        health: dict[str, Any] = {
+            "total_runs": total,
+            "completed": completed,
+            "failed": failed,
+            "failure_rate": round(failure_rate, 3),
+            "runs_by_state": state_counts,
+        }
+        return ExecutionResult(
+            action="self.health",
+            success=True,
+            detail=f"Health: {total} runs, {completed} completed, {failed} failed",
+            artifacts={"health": health},
+        )
+
+    def _handle_self_capabilities(self) -> ExecutionResult:
+        capabilities = self.introspector.discover_capabilities() if self.introspector else []
+        skills = self.introspector.discover_skills() if self.introspector else []
+        plugins = self.introspector.discover_plugins() if self.introspector else []
+        return ExecutionResult(
+            action="self.capabilities",
+            success=True,
+            detail=f"{len(capabilities)} capabilities, {len(skills)} skills, {len(plugins)} plugins",
+            artifacts={
+                "capabilities": capabilities,
+                "skills": skills,
+                "plugins": plugins,
+            },
+        )
+
+    def _handle_self_gaps(self) -> ExecutionResult:
+        limitations = self.introspector.discover_limitations() if self.introspector else []
+        return ExecutionResult(
+            action="self.gaps",
+            success=True,
+            detail=f"{len(limitations)} known limitations",
+            artifacts={"limitations": [lim.model_dump() for lim in limitations]},
+        )
+
+    def _handle_diagnosis_report(self, payload: dict[str, Any]) -> ExecutionResult:
+        if not self.diagnosis_engine:
+            return ExecutionResult(
+                action="diagnosis.report",
+                success=False,
+                detail="diagnosis engine not configured",
+            )
+        window_hours = int(payload.get("window_hours", 24))
+        report = self.diagnosis_engine.analyze_runs(window_hours=window_hours)
+        return ExecutionResult(
+            action="diagnosis.report",
+            success=True,
+            detail=f"Diagnosis: {report.total_runs} runs, health score {report.health_score:.2f}",
+            artifacts={"report": report.to_dict()},
+        )
 
     async def _run_codex_web_search(self, query: str) -> dict[str, Any]:
         if self.codex_search_runner is not None:

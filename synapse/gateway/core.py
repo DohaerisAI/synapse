@@ -23,6 +23,7 @@ from ..models import (
 )
 from ..providers import ModelRouter
 from ..session import SessionStateMachine
+from ..streaming.sink import StreamSink
 from ..skills import SkillRegistry
 from ..store import SQLiteStore
 from ..workspace import WorkspaceStore
@@ -32,6 +33,7 @@ from .approval import ApprovalHandler
 from .context import ContextBuilder
 from .executor import WorkflowExecutor
 from .extractors import RequestExtractors
+from .action_planner import ActionPlanner
 from .gws_planner import GWSPlanner
 from .ingest import IngestHandler
 from .planner import WorkflowPlanner
@@ -83,6 +85,7 @@ class Gateway:
         self.context_builder = ContextBuilder(self)
         self.extractors = RequestExtractors(self)
         self.gws_planner = GWSPlanner(self)
+        self.action_planner = ActionPlanner(self)
         self.executor = WorkflowExecutor(self)
         self.state_manager = StateManager(self)
         self.renderer = ReplyRenderer(self)
@@ -90,7 +93,7 @@ class Gateway:
         self.agent_loop = AgentLoop(self)
         self.ingest_handler = IngestHandler(self)
 
-    async def ingest(self, event: NormalizedInboundEvent) -> GatewayResult:
+    async def ingest(self, event: NormalizedInboundEvent, *, stream_sink: StreamSink | None = None) -> GatewayResult:
         session_key = derive_session_key(event.adapter, event.channel_id, event.user_id)
         await self.hooks.fire(HookEventType.MESSAGE_RECEIVED, {"event": event.to_dict(), "session_key": session_key})
         self.store.upsert_adapter_health(
@@ -181,7 +184,7 @@ class Gateway:
         )
 
         if workflow.intent == "chat.respond" and not workflow.steps and not self.context_builder.is_heartbeat(event):
-            result = await self.agent_loop.run(run, event, current)
+            result = await self.agent_loop.run(run, event, current, stream_sink=stream_sink)
             if result.status == RunState.COMPLETED.value:
                 await self._drain_queue(session_key)
             return result

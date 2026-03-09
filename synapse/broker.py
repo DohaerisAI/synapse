@@ -12,6 +12,8 @@ class CapabilityBroker:
 
         if action == "memory.read":
             return CapabilityDecision(allowed=True, requires_approval=False, executor="host", reason="memory reads are local and safe")
+        if action in {"self.describe", "self.health", "self.capabilities", "self.gaps", "diagnosis.report"}:
+            return CapabilityDecision(allowed=True, requires_approval=False, executor="host", reason="self-awareness and diagnosis actions are read-only")
         if action in {"capabilities.read", "reminder.create", "integration.propose", "integration.scaffold", "integration.test", "web.search"}:
             return CapabilityDecision(allowed=True, requires_approval=False, executor="host", reason="capability reads and reminders are host-safe")
         if action == "gws.inspect":

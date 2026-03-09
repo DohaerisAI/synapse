@@ -82,6 +82,33 @@ def create_app(runtime: Runtime | None = None, *, root: Path | None = None) -> F
     async def list_approvals() -> list[dict[str, Any]]:
         return [serialize(item) for item in runtime_instance.store.list_pending_approvals()]
 
+    @app.get("/api/self")
+    async def self_describe() -> dict[str, Any]:
+        introspector = runtime_instance.introspector
+        if introspector is None:
+            return {"error": "introspector not configured"}
+        capabilities = introspector.discover_capabilities()
+        skills = introspector.discover_skills()
+        plugins = introspector.discover_plugins()
+        limitations = [lim.model_dump() for lim in introspector.discover_limitations()]
+        architecture = [c.model_dump() for c in introspector.build_architecture().components]
+        return {
+            "identity": {"name": "Synapse", "version": "0.1.0"},
+            "capabilities": capabilities,
+            "skills": skills,
+            "plugins": plugins,
+            "limitations": limitations,
+            "architecture": architecture,
+        }
+
+    @app.get("/api/diagnosis")
+    async def diagnosis_report() -> dict[str, Any]:
+        engine = runtime_instance.diagnosis_engine
+        if engine is None:
+            return {"error": "diagnosis engine not configured"}
+        report = engine.analyze_runs()
+        return report.to_dict()
+
     @app.get("/api/skills")
     async def list_skills() -> list[dict[str, Any]]:
         return [serialize(item) for item in runtime_instance.skills.skills.values()]
@@ -320,6 +347,52 @@ def create_app(runtime: Runtime | None = None, *, root: Path | None = None) -> F
         )
         return page_html("Logs", body)
 
+    @app.get("/console/self", response_class=HTMLResponse)
+    async def console_self() -> str:
+        introspector = runtime_instance.introspector
+        sections = [nav_html()]
+        if introspector is None:
+            sections.append(section_html("Self", "<p>Introspector not configured.</p>"))
+        else:
+            caps = introspector.discover_capabilities()
+            skills_list = introspector.discover_skills()
+            limitations = [lim.model_dump() for lim in introspector.discover_limitations()]
+            arch = [c.model_dump() for c in introspector.build_architecture().components]
+            sections.extend([
+                metric_grid([
+                    ("Name", "Synapse"),
+                    ("Version", "0.1.0"),
+                    ("Capabilities", str(len(caps))),
+                    ("Skills", str(len(skills_list))),
+                    ("Limitations", str(len(limitations))),
+                ]),
+                section_html("Architecture", table_html(arch)),
+                section_html("Limitations", table_html(limitations) if limitations else "<p>None detected.</p>"),
+            ])
+        return page_html("Self", "\n".join(sections))
+
+    @app.get("/console/diagnosis", response_class=HTMLResponse)
+    async def console_diagnosis() -> str:
+        engine = runtime_instance.diagnosis_engine
+        sections = [nav_html()]
+        if engine is None:
+            sections.append(section_html("Diagnosis", "<p>Diagnosis engine not configured.</p>"))
+        else:
+            report = engine.analyze_runs()
+            data = report.to_dict()
+            sections.extend([
+                metric_grid([
+                    ("Total Runs", str(data["total_runs"])),
+                    ("Completed", str(data["completed_runs"])),
+                    ("Failed", str(data["failed_runs"])),
+                    ("Health Score", f"{data['health_score']:.0%}"),
+                ]),
+                section_html("Run States", definition_list(data["run_states"]) if data["run_states"] else "<p>No runs yet.</p>"),
+                section_html("Detected Gaps", table_html(data["gaps"]) if data["gaps"] else "<p>No gaps detected.</p>"),
+                section_html("Suggested Improvements", table_html(data["improvements"]) if data["improvements"] else "<p>No suggestions.</p>"),
+            ])
+        return page_html("Diagnosis", "\n".join(sections))
+
     return app
 
 
@@ -454,6 +527,8 @@ def nav_html() -> str:
 <a href="/console/adapters">Adapter Health</a>
 <a href="/console/heartbeat">Heartbeat</a>
 <a href="/console/logs">Logs</a>
+<a href="/console/self">Self</a>
+<a href="/console/diagnosis">Diagnosis</a>
 </nav>"""
 
 
