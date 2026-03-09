@@ -138,6 +138,26 @@ class Gateway:
             {"skills": list(self.skills.skills), "provider": self._resolved_provider_name()},
         )
 
+        try:
+            return await self._process_run(run, event, session_key, current, stream_sink=stream_sink)
+        except Exception:
+            # Safety net: ensure the run never stays stuck in an intermediate state
+            try:
+                self.state_manager.transition(run, current, RunState.FAILED, {"detail": "unhandled exception in ingest pipeline"})
+            except Exception:
+                # Last resort: force state directly
+                self.store.set_run_state(run.run_id, RunState.FAILED)
+            raise
+
+    async def _process_run(
+        self,
+        run: RunRecord,
+        event: NormalizedInboundEvent,
+        session_key: str,
+        current: RunState,
+        *,
+        stream_sink: StreamSink | None = None,
+    ) -> GatewayResult:
         pending_input = await self.planner.plan_pending_input(event, session_key=session_key)
         if pending_input is not None:
             current = self.state_manager.transition(

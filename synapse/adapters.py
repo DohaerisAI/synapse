@@ -15,6 +15,38 @@ from .models import NormalizedInboundEvent
 logger = logging.getLogger(__name__)
 
 
+def _split_text(text: str, *, max_len: int = 4096) -> list[str]:
+    """Split text into chunks that fit within Telegram's message limit.
+
+    Splits at paragraph boundaries (double newline) first, then single
+    newlines, then hard-cuts at max_len as a last resort.
+    """
+    if len(text) <= max_len:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining)
+            break
+        # Try splitting at last double newline within limit
+        cut = remaining[:max_len].rfind("\n\n")
+        if cut > 0:
+            chunks.append(remaining[:cut])
+            remaining = remaining[cut + 2:]
+            continue
+        # Try splitting at last single newline within limit
+        cut = remaining[:max_len].rfind("\n")
+        if cut > 0:
+            chunks.append(remaining[:cut])
+            remaining = remaining[cut + 1:]
+            continue
+        # Hard cut
+        chunks.append(remaining[:max_len])
+        remaining = remaining[max_len:]
+    return chunks
+
+
 class TelegramAdapter:
     def __init__(
         self,
@@ -25,7 +57,7 @@ class TelegramAdapter:
         poll_interval: float = 2.0,
     ) -> None:
         self.token = token
-        self.client = client or httpx.Client(timeout=15.0)
+        self.client = client or httpx.Client(timeout=30.0)
         self.polling_enabled = polling_enabled
         self.poll_interval = poll_interval
         self.last_error: str | None = None
@@ -58,13 +90,17 @@ class TelegramAdapter:
     def send_text(self, chat_id: str, text: str) -> dict[str, Any]:
         if not self.token:
             raise RuntimeError("telegram bot token is not configured")
-        rendered = self._render_telegram_html(text)
-        response = self.client.post(
-            f"https://api.telegram.org/bot{self.token}/sendMessage",
-            json={"chat_id": chat_id, "text": rendered, "parse_mode": "HTML"},
-        )
-        response.raise_for_status()
-        return response.json()
+        chunks = _split_text(text, max_len=4096)
+        last_response: dict[str, Any] = {}
+        for chunk in chunks:
+            rendered = self._render_telegram_html(chunk)
+            response = self.client.post(
+                f"https://api.telegram.org/bot{self.token}/sendMessage",
+                json={"chat_id": chat_id, "text": rendered, "parse_mode": "HTML"},
+            )
+            response.raise_for_status()
+            last_response = response.json()
+        return last_response
 
     def edit_text(self, chat_id: str, message_id: int, text: str) -> dict[str, Any]:
         if not self.token:
