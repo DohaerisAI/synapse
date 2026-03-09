@@ -89,5 +89,23 @@ DEFAULT_CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilityDefinition("self.capabilities", "self", "List all registered capabilities and loaded skills.", "{}"),
         CapabilityDefinition("self.gaps", "self", "Identify known limitations and missing capabilities.", "{}"),
         CapabilityDefinition("diagnosis.report", "diagnosis", "Analyze recent runs, detect gaps, and suggest improvements.", "{window_hours?: int}"),
+        # Finance — Read (safe)
+        CapabilityDefinition("finance.holdings.read", "finance", "View equity holdings with P&L from connected broker.", "{}"),
+        CapabilityDefinition("finance.positions.read", "finance", "View open positions (intraday/delivery) from broker.", "{}"),
+        CapabilityDefinition("finance.margins.read", "finance", "View available trading margins.", "{}"),
+        CapabilityDefinition("finance.mf.holdings", "finance", "View mutual fund holdings with current value.", "{}"),
+        CapabilityDefinition("finance.mf.nav_history", "finance", "Fetch NAV history for a mutual fund scheme.", "{scheme_code}"),
+        CapabilityDefinition("finance.mf.sip_xirr", "finance", "Calculate SIP XIRR for a mutual fund.", "{scheme_code, sip_amount?, start_date?}"),
+        CapabilityDefinition("finance.technical.analyze", "finance", "Run technical analysis on a symbol.", "{symbol, interval?}"),
+        CapabilityDefinition("finance.technical.scan", "finance", "Scan for swing trade setups matching criteria.", "{criteria?, market?}"),
+        CapabilityDefinition("finance.chart.capture", "finance", "Capture a TradingView chart screenshot.", "{symbol, interval?}"),
+        CapabilityDefinition("finance.chart.analyze", "finance", "Analyze a chart image for patterns using vision.", "{symbol, interval?}"),
+        CapabilityDefinition("finance.sentiment.analyze", "finance", "Analyze market sentiment for a symbol or sector.", "{symbol?, sector?}"),
+        CapabilityDefinition("finance.macro.summary", "finance", "Summarize macro indicators and economic calendar.", "{}"),
+        CapabilityDefinition("finance.portfolio.summary", "finance", "Generate portfolio summary with allocation breakdown.", "{}"),
+        CapabilityDefinition("finance.portfolio.risk", "finance", "Analyze portfolio risk metrics.", "{}"),
+        # Finance — Write
+        CapabilityDefinition("finance.trade.suggest", "finance", "Suggest trade ideas based on analysis (advisory only).", "{symbol?, strategy?}"),
+        CapabilityDefinition("finance.trade.gtt_place", "finance", "Place a GTT order on broker (requires approval).", "{symbol, trigger_price, quantity, transaction_type, order_type}"),
     ]
 )

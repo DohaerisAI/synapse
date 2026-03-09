@@ -396,7 +396,7 @@ def step_gws(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, str]:
 
 def step_heartbeat(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, str]:
     """Prompt for heartbeat configuration."""
-    prompter.section(5, "Heartbeat")
+    prompter.section(6, "Heartbeat")
 
     enabled = prompter.confirm(
         "Enable heartbeat?",
@@ -443,7 +443,7 @@ def step_heartbeat(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, s
 
 def step_server(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, str]:
     """Prompt for server host/port configuration."""
-    prompter.section(6, "Server")
+    prompter.section(7, "Server")
 
     host = prompter.text(
         "Server host:",
@@ -468,6 +468,96 @@ def step_server(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, str]
         )
 
     return {**env, "SERVER_HOST": host, "SERVER_PORT": port}
+
+
+# -- MCP / Financial Services -------------------------------------------------
+
+
+_MCP_SERVICES = {
+    "kite": {
+        "server_id": "kite",
+        "url": "https://mcp.kite.trade/mcp",
+        "auth_type": "oauth",
+        "label": "Zerodha Kite",
+        "hint": "Equity/MF holdings, positions, margins, GTT orders",
+        "needs_token": True,
+        "token_prompt": "Kite API key/token:",
+    },
+    "mfapi": {
+        "server_id": "mfapi",
+        "url": "https://xpack.ai/mcp/mfapi",
+        "auth_type": "none",
+        "label": "India MF API",
+        "hint": "All Indian MF schemes, daily NAV, full history (free, no auth)",
+        "needs_token": False,
+    },
+    "tradingview": {
+        "server_id": "tradingview",
+        "url": "https://mcp.tradingviewapi.com/mcp",
+        "auth_type": "jwt",
+        "label": "TradingView Data",
+        "hint": "Prices, quotes, TA scores, calendar, news (needs RapidAPI key)",
+        "needs_token": True,
+        "token_prompt": "TradingView RapidAPI key:",
+    },
+}
+
+
+def step_mcp(prompter: WizardPrompter, env: dict[str, str], root: Path) -> dict[str, str]:
+    """Prompt for MCP financial services configuration."""
+    prompter.section(5, "Financial Services (MCP)")
+
+    enabled = prompter.confirm(
+        "Enable financial services? (portfolio, MF, charts, trading)",
+        default=False,
+    )
+    if not enabled:
+        return {**env, "_MCP_ENABLED": "0"}
+
+    selected = prompter.multi_select(
+        "Which financial services to connect?",
+        options=[
+            (svc["label"], key, svc["hint"])
+            for key, svc in _MCP_SERVICES.items()
+        ],
+        defaults=["kite", "mfapi"],
+    )
+
+    if not selected:
+        prompter.note("No services selected. Skipping MCP setup.", title="MCP")
+        return {**env, "_MCP_ENABLED": "0"}
+
+    # Collect auth tokens for services that need them
+    tokens: dict[str, str] = {}
+    for key in selected:
+        svc = _MCP_SERVICES.get(key)
+        if svc and svc.get("needs_token"):
+            token = prompter.password(svc["token_prompt"])
+            tokens[key] = token
+
+    # Generate mcp.yaml
+    _write_mcp_yaml(root, selected, tokens)
+    prompter.note(f"MCP config written to {root / 'mcp.yaml'}", title="MCP")
+
+    return {**env, "_MCP_ENABLED": "1"}
+
+
+def _write_mcp_yaml(root: Path, selected: list[str], tokens: dict[str, str]) -> None:
+    """Write mcp.yaml from wizard selections."""
+    lines = ["enabled: true", "connections:"]
+    for key in selected:
+        svc = _MCP_SERVICES.get(key)
+        if svc is None:
+            continue
+        lines.append(f"  - server_id: {svc['server_id']}")
+        lines.append(f"    url: \"{svc['url']}\"")
+        lines.append(f"    auth:")
+        lines.append(f"      auth_type: {svc['auth_type']}")
+        token = tokens.get(key, "")
+        if token:
+            lines.append(f"      token: \"{token}\"")
+        lines.append(f"    enabled: true")
+    (root / "mcp.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # -- Helpers ------------------------------------------------------------------

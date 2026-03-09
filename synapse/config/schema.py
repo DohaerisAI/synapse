@@ -57,6 +57,26 @@ class RuntimePaths(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
 
+class MCPAuthConfig(BaseModel):
+    auth_type: str = "none"
+    token: str = ""
+    refresh_url: str = ""
+    scopes: list[str] = Field(default_factory=list)
+
+
+class MCPConnectionConfig(BaseModel):
+    server_id: str = ""
+    url: str = ""
+    auth: MCPAuthConfig = Field(default_factory=MCPAuthConfig)
+    enabled: bool = True
+    rate_limit: int = 60
+
+
+class MCPConfig(BaseModel):
+    enabled: bool = False
+    connections: list[MCPConnectionConfig] = Field(default_factory=list)
+
+
 class AppConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8000
@@ -66,6 +86,7 @@ class AppConfig(BaseModel):
     gws: GWSConfig = Field(default_factory=GWSConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     model_config = {"arbitrary_types_allowed": True}
 

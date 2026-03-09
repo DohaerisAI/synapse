@@ -132,6 +132,29 @@ class SQLiteStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_reminders_due_at ON reminders(due_at);
                 CREATE INDEX IF NOT EXISTS idx_reminders_status_due_at ON reminders(status, due_at);
+
+                CREATE TABLE IF NOT EXISTS mcp_connections (
+                    server_id TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    auth_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    tool_count INTEGER NOT NULL DEFAULT 0,
+                    last_health_check TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS mcp_call_log (
+                    call_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    success INTEGER NOT NULL,
+                    latency_ms REAL NOT NULL DEFAULT 0.0,
+                    error TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_mcp_call_log_server ON mcp_call_log(server_id);
+                CREATE INDEX IF NOT EXISTS idx_mcp_call_log_created ON mcp_call_log(created_at);
                 """
             )
 
@@ -819,6 +842,79 @@ class SQLiteStore:
                 (limit,),
             ).fetchall()
         return [self._reminder_from_row(row) for row in rows]
+
+    def upsert_mcp_connection(
+        self,
+        *,
+        server_id: str,
+        url: str,
+        auth_type: str,
+        status: str,
+        tool_count: int = 0,
+        last_health_check: str | None = None,
+    ) -> None:
+        now = utc_now().isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO mcp_connections (server_id, url, auth_type, status, tool_count, last_health_check, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(server_id) DO UPDATE SET
+                    url = excluded.url,
+                    auth_type = excluded.auth_type,
+                    status = excluded.status,
+                    tool_count = excluded.tool_count,
+                    last_health_check = COALESCE(excluded.last_health_check, mcp_connections.last_health_check),
+                    updated_at = excluded.updated_at
+                """,
+                (server_id, url, auth_type, status, tool_count, last_health_check, now, now),
+            )
+
+    def list_mcp_connections(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM mcp_connections ORDER BY server_id").fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_mcp_connection(self, server_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM mcp_connections WHERE server_id = ?", (server_id,))
+
+    def log_mcp_call(
+        self,
+        *,
+        server_id: str,
+        tool_name: str,
+        success: bool,
+        latency_ms: float,
+        error: str | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO mcp_call_log (server_id, tool_name, success, latency_ms, error, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (server_id, tool_name, int(success), latency_ms, error, utc_now().isoformat()),
+            )
+
+    def list_mcp_calls(
+        self,
+        *,
+        server_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            if server_id is not None:
+                rows = connection.execute(
+                    "SELECT * FROM mcp_call_log WHERE server_id = ? ORDER BY call_id DESC LIMIT ?",
+                    (server_id, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM mcp_call_log ORDER BY call_id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [dict(row) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)

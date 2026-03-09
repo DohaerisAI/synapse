@@ -40,6 +40,10 @@ class CapabilityBroker:
             command = str(payload.get("command", "")).strip().split(" ", 1)[0]
             requires_approval = command not in SAFE_SHELL_COMMANDS
             return CapabilityDecision(allowed=True, requires_approval=requires_approval, executor="docker", reason="shell execution is isolated")
+        if action.startswith("finance."):
+            if action == "finance.trade.gtt_place":
+                return CapabilityDecision(allowed=True, requires_approval=True, executor="host", reason="GTT order placement requires approval")
+            return CapabilityDecision(allowed=True, requires_approval=False, executor="host", reason="finance read/analysis actions are safe")
         if action == "web.fetch":
             return CapabilityDecision(allowed=True, requires_approval=False, executor="docker", reason="web fetches should be isolated")
         if action == "code.patch.propose":

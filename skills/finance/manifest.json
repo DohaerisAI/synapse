@@ -1,0 +1,23 @@
+{
+  "id": "finance",
+  "name": "Financial Advisor",
+  "description": "Portfolio viewing, technical analysis, swing trade scanning, chart analysis, and market intelligence for Indian equities and mutual funds.",
+  "capabilities": [
+    "finance.holdings.read",
+    "finance.positions.read",
+    "finance.margins.read",
+    "finance.mf.holdings",
+    "finance.mf.nav_history",
+    "finance.mf.sip_xirr",
+    "finance.technical.analyze",
+    "finance.technical.scan",
+    "finance.chart.capture",
+    "finance.chart.analyze",
+    "finance.sentiment.analyze",
+    "finance.macro.summary",
+    "finance.portfolio.summary",
+    "finance.portfolio.risk",
+    "finance.trade.suggest",
+    "finance.trade.gtt_place"
+  ]
+}

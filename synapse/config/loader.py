@@ -7,6 +7,7 @@ from .schema import (
     AppConfig,
     GWSConfig,
     HeartbeatConfig,
+    MCPConfig,
     ProviderConfig,
     TelegramConfig,
 )
@@ -101,6 +102,21 @@ def _env_text(env: dict[str, str], key: str, default: str = "") -> str:
     return value.replace("\\n", "\n").strip()
 
 
+def _load_mcp_config(root: Path) -> MCPConfig:
+    """Load MCP configuration from mcp.yaml in the root directory."""
+    mcp_path = root / "mcp.yaml"
+    if not mcp_path.exists():
+        return MCPConfig()
+    try:
+        import yaml
+        data = yaml.safe_load(mcp_path.read_text(encoding="utf-8"))
+    except Exception:
+        return MCPConfig()
+    if not isinstance(data, dict):
+        return MCPConfig()
+    return MCPConfig.model_validate(data)
+
+
 def load_config(root: Path, env: dict[str, str]) -> AppConfig:
     app = AppConfig.from_root(root)
     app.agent = AgentConfig(
@@ -136,4 +152,5 @@ def load_config(root: Path, env: dict[str, str]) -> AppConfig:
         active_hours=env.get("HEARTBEAT_ACTIVE_HOURS", "").strip(),
         max_chars=_env_int(env, "HEARTBEAT_MAX_CHARS", 400),
     )
+    app.mcp = _load_mcp_config(root)
     return app
