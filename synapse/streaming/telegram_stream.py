@@ -170,8 +170,8 @@ class TelegramDraftStream:
 
     @property
     def streamed(self) -> bool:
-        """True if at least one message/draft was sent via streaming."""
-        return self._message_id is not None or self._draft_sent
+        """True if any content was pushed via streaming (deltas received)."""
+        return len(self._parts) > 0 or self._message_id is not None or self._draft_sent
 
     @property
     def transport(self) -> str:
