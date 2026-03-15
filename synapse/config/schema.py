@@ -4,11 +4,14 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ..usage import PricingEntry
+
 
 class TelegramConfig(BaseModel):
     bot_token: str = ""
     polling_enabled: bool = False
     poll_interval: float = 2.0
+    reactions_enabled: bool = True
 
 
 class GWSConfig(BaseModel):
@@ -42,6 +45,26 @@ class HeartbeatConfig(BaseModel):
     ack_mode: str = "silent_ok"
     active_hours: str = ""
     max_chars: int = 400
+
+
+class ExecutionConfig(BaseModel):
+    isolated_execution_enabled: bool = False
+    skill_auto_install_deps: bool = False
+    enable_live_analyze_nl_router: bool = False
+    docker_image: str = "python:3.11-slim"
+    docker_allow_network: bool = False
+    docker_mount_workspace: bool = True
+    timeout_seconds: int = 60
+    max_output_bytes: int = 64 * 1024
+
+
+class FilesystemConfig(BaseModel):
+    allow_absolute: bool = False
+    require_approval: bool = False
+
+
+class JobsConfig(BaseModel):
+    max_concurrency: int = 1
 
 
 class RuntimePaths(BaseModel):
@@ -88,7 +111,11 @@ class AppConfig(BaseModel):
     gws: GWSConfig = Field(default_factory=GWSConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    filesystem: FilesystemConfig = Field(default_factory=FilesystemConfig)
+    jobs: JobsConfig = Field(default_factory=JobsConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    pricing: dict[str, PricingEntry] = Field(default_factory=dict)
 
     model_config = {"arbitrary_types_allowed": True}
 

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 from .schema import (
     AgentConfig,
     AppConfig,
+    ExecutionConfig,
+    FilesystemConfig,
     GWSConfig,
     HeartbeatConfig,
+    JobsConfig,
     MCPConfig,
     ProviderConfig,
     TelegramConfig,
@@ -18,6 +22,7 @@ CONFIG_FIELDS = [
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_POLLING_ENABLED",
     "TELEGRAM_POLL_INTERVAL",
+    "TELEGRAM_REACTIONS_ENABLED",
     "GWS_ENABLED",
     "GWS_BINARY",
     "GWS_ALLOWED_SERVICES",
@@ -28,6 +33,17 @@ CONFIG_FIELDS = [
     "HEARTBEAT_ACK_MODE",
     "HEARTBEAT_ACTIVE_HOURS",
     "HEARTBEAT_MAX_CHARS",
+    "EXECUTION_ISOLATED_ENABLED",
+    "SKILL_AUTO_INSTALL_DEPS",
+    "EXECUTION_ENABLE_LIVE_ANALYZE_NL_ROUTER",
+    "EXECUTION_DOCKER_IMAGE",
+    "EXECUTION_DOCKER_ALLOW_NETWORK",
+    "EXECUTION_DOCKER_MOUNT_WORKSPACE",
+    "EXECUTION_TIMEOUT_SECONDS",
+    "EXECUTION_MAX_OUTPUT_BYTES",
+    "FS_ALLOW_ABSOLUTE",
+    "FS_REQUIRE_APPROVAL",
+    "JOB_MAX_CONCURRENCY",
     "CODEX_MODEL",
     "CODEX_AUTH_FILE",
     "CODEX_TRANSPORT",
@@ -39,6 +55,7 @@ CONFIG_FIELDS = [
     "CUSTOM_API_BASE_URL",
     "CUSTOM_API_KEY",
     "CUSTOM_API_MODEL",
+    "PRICING_JSON",
     "SERVER_HOST",
     "SERVER_PORT",
 ]
@@ -117,8 +134,20 @@ def _load_mcp_config(root: Path) -> MCPConfig:
     return MCPConfig.model_validate(data)
 
 
+def _load_fallback_config(root: Path) -> dict[str, object]:
+    config_path = AppConfig.from_root(root).paths.fallback_config_path
+    if not config_path.exists():
+        return {}
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def load_config(root: Path, env: dict[str, str]) -> AppConfig:
     app = AppConfig.from_root(root)
+    fallback = _load_fallback_config(root)
     app.agent = AgentConfig(
         name=env.get("AGENT_NAME", "Agent"),
         extra_instructions=_env_text(env, "AGENT_EXTRA_INSTRUCTIONS", ""),
@@ -127,6 +156,7 @@ def load_config(root: Path, env: dict[str, str]) -> AppConfig:
         bot_token=env.get("TELEGRAM_BOT_TOKEN", ""),
         polling_enabled=_env_bool(env, "TELEGRAM_POLLING_ENABLED"),
         poll_interval=_env_float(env, "TELEGRAM_POLL_INTERVAL", 2.0),
+        reactions_enabled=_env_bool(env, "TELEGRAM_REACTIONS_ENABLED", True),
     )
     app.gws = GWSConfig(
         enabled=_env_bool(env, "GWS_ENABLED"),
@@ -152,5 +182,31 @@ def load_config(root: Path, env: dict[str, str]) -> AppConfig:
         active_hours=env.get("HEARTBEAT_ACTIVE_HOURS", "").strip(),
         max_chars=_env_int(env, "HEARTBEAT_MAX_CHARS", 400),
     )
+    app.execution = ExecutionConfig(
+        isolated_execution_enabled=_env_bool(env, "EXECUTION_ISOLATED_ENABLED"),
+        skill_auto_install_deps=_env_bool(env, "SKILL_AUTO_INSTALL_DEPS"),
+        enable_live_analyze_nl_router=_env_bool(env, "EXECUTION_ENABLE_LIVE_ANALYZE_NL_ROUTER", False),
+        docker_image=env.get("EXECUTION_DOCKER_IMAGE", "python:3.11-slim").strip() or "python:3.11-slim",
+        docker_allow_network=_env_bool(env, "EXECUTION_DOCKER_ALLOW_NETWORK"),
+        docker_mount_workspace=_env_bool(env, "EXECUTION_DOCKER_MOUNT_WORKSPACE", True),
+        timeout_seconds=_env_int(env, "EXECUTION_TIMEOUT_SECONDS", 60),
+        max_output_bytes=_env_int(env, "EXECUTION_MAX_OUTPUT_BYTES", 64 * 1024),
+    )
+    app.filesystem = FilesystemConfig(
+        allow_absolute=_env_bool(env, "FS_ALLOW_ABSOLUTE"),
+        require_approval=_env_bool(env, "FS_REQUIRE_APPROVAL"),
+    )
+    app.jobs = JobsConfig(
+        max_concurrency=max(1, _env_int(env, "JOB_MAX_CONCURRENCY", 1)),
+    )
     app.mcp = _load_mcp_config(root)
+    raw_pricing = fallback.get("pricing", {})
+    if env.get("PRICING_JSON", "").strip():
+        from ..usage import parse_pricing_json
+
+        app.pricing = parse_pricing_json(env["PRICING_JSON"])
+    else:
+        from ..usage import normalize_pricing
+
+        app.pricing = normalize_pricing(raw_pricing)
     return app

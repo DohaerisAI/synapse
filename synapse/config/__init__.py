@@ -8,6 +8,7 @@ from .loader import (
 from .schema import (
     AgentConfig,
     AppConfig,
+    ExecutionConfig,
     GWSConfig,
     HeartbeatConfig,
     ProviderConfig,
@@ -22,6 +23,7 @@ __all__ = [
     "AgentConfig",
     "AppConfig",
     "CONFIG_FIELDS",
+    "ExecutionConfig",
     "GWSConfig",
     "HeartbeatConfig",
     "ProviderConfig",

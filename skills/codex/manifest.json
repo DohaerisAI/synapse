@@ -1,0 +1,6 @@
+{
+  "id": "codex",
+  "name": "codex",
+  "description": "Proposal-only agentic coding with Codex CLI. Generates plans, patches, and test commands under var/proposals without editing the source repo directly.",
+  "capabilities": ["coding", "proposal"]
+}
