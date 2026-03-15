@@ -1,0 +1,6 @@
+{
+  "id": "swing-trader",
+  "name": "Indian Equity Swing Trader",
+  "description": "Scan NSE stocks for swing setups (inside candle, NR7, volume dry-up, engulfing), size positions with TKM rules, manage trailing SL exits. Uses tradingview_ta for screening and Kite MCP for execution. Say 'scan for swings', 'analyze RELIANCE', 'swing setups today'.",
+  "capabilities": ["finance.swing"]
+}
