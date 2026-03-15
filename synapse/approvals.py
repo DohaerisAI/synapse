@@ -3,12 +3,22 @@ from __future__ import annotations
 
 import fnmatch
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .store import SQLiteStore
     from .tools.registry import ToolDef
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalDecision:
+    approved: bool = False
+    pending: bool = False
+    approval_id: str | None = None
+    message: str | None = None
 
 
 class ApprovalManager:
@@ -65,28 +75,82 @@ class ApprovalManager:
 
         Returns True if approved, False if denied.
         """
+        decision = await self.authorize_tool_call(
+            tool,
+            params,
+            send_fn=send_fn,
+            receive_fn=receive_fn,
+        )
+        return decision.approved
+
+    async def authorize_tool_call(
+        self,
+        tool: "ToolDef",
+        params: dict[str, Any],
+        *,
+        send_fn: Callable[..., Any] | None = None,
+        receive_fn: Callable[..., Any] | None = None,
+        store: "SQLiteStore | None" = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
+        event: dict[str, Any] | None = None,
+        system_prompt: str | None = None,
+        messages: list[dict[str, Any]] | None = None,
+        tool_call_id: str | None = None,
+        turn: int | None = None,
+        tool_calls_made: list[dict[str, Any]] | None = None,
+    ) -> ApprovalDecision:
+        """Resolve approval for a tool call.
+
+        If interactive callbacks are present, approval is resolved inline.
+        Otherwise, if run context is available, a pending approval record is created.
+        """
         if self.is_allowed(tool.name):
-            return True
+            return ApprovalDecision(approved=True)
 
-        if send_fn is None or receive_fn is None:
-            # No interactive channel — auto-approve with warning
-            import logging
-            logging.getLogger(__name__).warning(
-                "No interactive channel for approval of '%s' — auto-approving", tool.name,
+        if send_fn is not None and receive_fn is not None:
+            prompt = (
+                f"Tool '{tool.name}' requires approval.\n"
+                f"Params: {json.dumps(params, default=str)}\n"
+                "Approve? (yes/no/always)"
             )
-            return True
+            await send_fn(prompt)
+            response = await receive_fn()
+            lowered = str(response).strip().lower()
+            if lowered in {"always", "yes always"}:
+                self.add_to_allowlist(tool.name)
+                return ApprovalDecision(approved=True)
+            if lowered in {"yes", "y", "approve", "go ahead", "ok", "sure"}:
+                return ApprovalDecision(approved=True)
+            return ApprovalDecision(approved=False, message="tool call denied by user")
 
-        # Send approval prompt
-        prompt = f"Tool '{tool.name}' requires approval.\nParams: {json.dumps(params, default=str)}\nApprove? (yes/no/always)"
-        await send_fn(prompt)
+        if all(
+            value is not None
+            for value in (store, run_id, session_key, event, system_prompt, messages, tool_call_id)
+        ):
+            approval = store.create_approval(
+                run_id,
+                session_key,
+                tool.name,
+                {
+                    "kind": "react_tool_call",
+                    "tool_name": tool.name,
+                    "params": params,
+                    "event": event,
+                    "system_prompt": system_prompt,
+                    "messages": messages,
+                    "tool_call_id": tool_call_id,
+                    "turn": turn,
+                    "tool_calls_made": list(tool_calls_made or []),
+                },
+            )
+            return ApprovalDecision(
+                pending=True,
+                approval_id=approval.approval_id,
+                message=f"Approval required before running '{tool.name}'.",
+            )
 
-        # Wait for response
-        response = await receive_fn()
-        lowered = str(response).strip().lower()
-
-        if lowered in {"always", "yes always"}:
-            self.add_to_allowlist(tool.name)
-            return True
-        if lowered in {"yes", "y", "approve", "go ahead", "ok", "sure"}:
-            return True
-        return False
+        return ApprovalDecision(
+            approved=False,
+            message=f"Approval is required before I can run '{tool.name}'.",
+        )

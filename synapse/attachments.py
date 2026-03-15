@@ -6,7 +6,10 @@ import io
 import zipfile
 from xml.etree import ElementTree
 
-from PIL import Image
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - depends on optional Pillow install
+    Image = None  # type: ignore[assignment]
 
 
 MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
@@ -82,6 +85,8 @@ def _extract_image_payload(
         (".png", ".jpg", ".jpeg", ".webp", ".gif")
     ):
         return None
+    if Image is None:
+        return {"content_status": "unsupported"}
     try:
         image = Image.open(io.BytesIO(data))
         image.load()

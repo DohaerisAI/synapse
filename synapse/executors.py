@@ -17,9 +17,11 @@ from .integrations import IntegrationRegistry
 from .introspection import RuntimeIntrospector
 from .memory import MemoryStore
 from .models import ExecutionResult, IntegrationStatus, PlannedAction, RunState
+from .skill_runtime import CommandRunner, DependencyInstallDisabledError
 from .self_model import Identity
 from .skills import SkillRegistry
 from .store import SQLiteStore
+from .usage import PricingEntry, render_telegram_usage_summary
 
 _ALLOWED_SCHEMES = {"http", "https"}
 _BLOCKED_HOSTS = re.compile(
@@ -51,6 +53,8 @@ class HostExecutor:
         codex_search_runner: Callable[[str], dict[str, Any]] | None = None,
         introspector: RuntimeIntrospector | None = None,
         diagnosis_engine: DiagnosisEngine | None = None,
+        command_runner: CommandRunner | None = None,
+        pricing: dict[str, PricingEntry] | None = None,
     ) -> None:
         self.memory = memory
         self.skills = skills
@@ -62,6 +66,8 @@ class HostExecutor:
         self.codex_search_runner = codex_search_runner
         self.introspector = introspector
         self.diagnosis_engine = diagnosis_engine
+        self.command_runner = command_runner
+        self.pricing = pricing or {}
 
     async def execute(self, action: PlannedAction, *, session_key: str, user_id: str) -> ExecutionResult:
         if action.action == "memory.read":
@@ -171,6 +177,45 @@ class HostExecutor:
             )
             return ExecutionResult(action=action.action, success=True, detail="reminder scheduled", artifacts={"reminder_id": reminder.reminder_id, "due_at": due_at, "message": message},
             )
+        if action.action == "shell.exec":
+            command = str(action.payload.get("command", "")).strip()
+            if not command:
+                return ExecutionResult(action=action.action, success=False, detail="missing shell command")
+            if self.command_runner is None:
+                process = await asyncio.create_subprocess_exec(
+                    *shlex.split(command),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+                stdout_text = stdout.decode() if stdout else ""
+                stderr_text = stderr.decode() if stderr else ""
+                detail = stdout_text.strip() or stderr_text.strip() or f"exit code {process.returncode}"
+                return ExecutionResult(
+                    action=action.action,
+                    success=process.returncode == 0,
+                    detail=detail,
+                    artifacts={"mode": "host", "exit_code": process.returncode},
+                )
+            try:
+                result = await self.command_runner.run(command)
+            except DependencyInstallDisabledError as error:
+                return ExecutionResult(
+                    action=action.action,
+                    success=False,
+                    detail=str(error),
+                    artifacts={"mode": "host", "dependency_install_blocked": True},
+                )
+            return ExecutionResult(
+                action=action.action,
+                success=result.success,
+                detail=result.output,
+                artifacts={
+                    "mode": result.mode,
+                    "exit_code": result.exit_code,
+                    **result.artifacts,
+                },
+            )
         if action.action == "self.describe":
             return self._handle_self_describe()
         if action.action == "self.health":
@@ -181,6 +226,17 @@ class HostExecutor:
             return self._handle_self_gaps()
         if action.action == "diagnosis.report":
             return self._handle_diagnosis_report(action.payload)
+        if action.action == "usage.summary":
+            return self._handle_usage_summary(action.payload)
+        if action.action == "jobs.list":
+            limit = int(action.payload.get("limit", 20) or 20)
+            jobs = self.store.list_jobs(limit=limit)
+            return ExecutionResult(
+                action=action.action,
+                success=True,
+                detail=f"{len(jobs)} jobs",
+                artifacts={"jobs": [j.model_dump() for j in jobs]},
+            )
         return ExecutionResult(action=action.action, success=False, detail="unsupported host action")
 
     def _handle_self_describe(self) -> ExecutionResult:
@@ -269,6 +325,16 @@ class HostExecutor:
             artifacts={"report": report.to_dict()},
         )
 
+    def _handle_usage_summary(self, payload: dict[str, Any]) -> ExecutionResult:
+        window_hours = int(payload.get("window_hours", 24) or 24)
+        summary = self.store.summarize_usage(window_hours=window_hours, pricing=self.pricing)
+        return ExecutionResult(
+            action="usage.summary",
+            success=True,
+            detail=render_telegram_usage_summary(summary),
+            artifacts={"summary": summary},
+        )
+
     async def _run_codex_web_search(self, query: str) -> dict[str, Any]:
         if self.codex_search_runner is not None:
             return self.codex_search_runner(query)
@@ -312,14 +378,35 @@ class HostExecutor:
 
 
 class IsolatedExecutor:
-    def __init__(self) -> None:
+    def __init__(self, *, command_runner: CommandRunner | None = None) -> None:
         self.client = httpx.AsyncClient(timeout=15.0)
+        self.command_runner = command_runner
 
     async def execute(self, action: PlannedAction) -> ExecutionResult:
         if action.action == "shell.exec":
             command = str(action.payload.get("command", "")).strip()
             if not command:
                 return ExecutionResult(action=action.action, success=False, detail="missing shell command")
+            if self.command_runner is not None:
+                try:
+                    result = await self.command_runner.run(command)
+                except DependencyInstallDisabledError as error:
+                    return ExecutionResult(
+                        action=action.action,
+                        success=False,
+                        detail=str(error),
+                        artifacts={"mode": "host", "dependency_install_blocked": True},
+                    )
+                return ExecutionResult(
+                    action=action.action,
+                    success=result.success,
+                    detail=result.output,
+                    artifacts={
+                        "mode": result.mode,
+                        "exit_code": result.exit_code,
+                        **result.artifacts,
+                    },
+                )
             process = await asyncio.create_subprocess_exec(
                 *shlex.split(command),
                 stdout=asyncio.subprocess.PIPE,

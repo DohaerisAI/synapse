@@ -1,8 +1,12 @@
 """Tests for tool registry — RED phase."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from synapse.memory import MemoryStore
+from synapse.store import SQLiteStore
 from synapse.tools.registry import ToolContext, ToolDef, ToolRegistry, ToolResult
 
 
@@ -156,3 +160,46 @@ class TestToolRegistry:
         builtins = reg.tools_by_category("builtin")
         assert len(builtins) == 2
         assert {t.name for t in builtins} == {"a", "c"}
+
+    def test_replace_tools_swaps_skill_tools_without_touching_existing_snapshot(self):
+        reg = ToolRegistry()
+        reg.register(_make_tool("builtin.echo"))
+        reg.register(_make_tool("skill.finance.analyze", category="skill.finance"))
+
+        snapshot = reg.all_tools()
+
+        reg.replace_tools(
+            predicate=lambda tool: tool.name.startswith("skill."),
+            replacements=[_make_tool("skill.finance.rebalance", category="skill.finance")],
+        )
+
+        assert {tool.name for tool in snapshot} == {"builtin.echo", "skill.finance.analyze"}
+        assert reg.get("skill.finance.analyze") is None
+        assert reg.get("skill.finance.rebalance") is not None
+        assert reg.get("builtin.echo") is not None
+
+    @pytest.mark.asyncio
+    async def test_tool_execution_creates_tool_event(self, tmp_path):
+        reg = ToolRegistry()
+        reg.register(_make_tool("alpha", needs_approval=True))
+        store = SQLiteStore(tmp_path / "runtime.sqlite3")
+        store.initialize()
+        memory = MemoryStore(tmp_path / "memory")
+        memory.initialize()
+        ctx = ToolContext(
+            session_key="sess-1",
+            user_id="user-1",
+            memory=memory,
+            store=store,
+            config=SimpleNamespace(),
+            run_id="run-1",
+        )
+
+        result = await reg.get("alpha").execute({"x": "1"}, ctx=ctx)
+
+        assert result.output == "ok"
+        events = store.list_tool_events(run_id="run-1")
+        assert len(events) == 1
+        assert events[0].tool_name == "alpha"
+        assert events[0].needs_approval is True
+        assert events[0].status == "ok"

@@ -102,3 +102,13 @@ class TestApprovalManager:
         # Check persistence
         reloaded = ApprovalManager(allow_file)
         assert reloaded.is_allowed("shell_exec") is True
+
+    @pytest.mark.asyncio
+    async def test_check_without_interactive_channel_is_not_auto_approved(self, tmp_path: Path):
+        allow_file = tmp_path / "approvals.json"
+        mgr = ApprovalManager(allow_file)
+        tool = _make_tool("shell_exec")
+
+        result = await mgr.check_and_approve(tool, {"command": "rm -rf /tmp/example"})
+
+        assert result is False
