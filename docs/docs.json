@@ -21,64 +21,74 @@
       }
     ]
   },
-  "navigation": [
-    {
-      "group": "Get Started",
-      "pages": [
-        "get-started/quickstart",
-        "get-started/onboarding",
-        "get-started/configuration"
-      ]
+  "navigation": {
+    "global": {
+      "anchors": []
     },
-    {
-      "group": "Concepts",
-      "pages": [
-        "concepts/architecture",
-        "concepts/react-loop",
-        "concepts/skills",
-        "concepts/memory",
-        "concepts/approvals",
-        "concepts/sessions"
-      ]
-    },
-    {
-      "group": "Channels",
-      "pages": [
-        "channels/telegram"
-      ]
-    },
-    {
-      "group": "Tools",
-      "pages": [
-        "tools/builtins",
-        "tools/skills",
-        "tools/mcp"
-      ]
-    },
-    {
-      "group": "Features",
-      "pages": [
-        "features/background-jobs",
-        "features/usage-tracking",
-        "features/self-awareness",
-        "features/codex-proposals"
-      ]
-    },
-    {
-      "group": "Providers",
-      "pages": [
-        "providers/codex",
-        "providers/azure",
-        "providers/openai-compatible"
-      ]
-    },
-    {
-      "group": "Reference",
-      "pages": [
-        "reference/cli",
-        "reference/api",
-        "reference/env"
-      ]
-    }
-  ]
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "get-started/quickstart",
+              "get-started/onboarding",
+              "get-started/configuration"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/react-loop",
+              "concepts/skills",
+              "concepts/memory",
+              "concepts/approvals",
+              "concepts/sessions"
+            ]
+          },
+          {
+            "group": "Channels",
+            "pages": [
+              "channels/telegram"
+            ]
+          },
+          {
+            "group": "Tools",
+            "pages": [
+              "tools/builtins",
+              "tools/skills",
+              "tools/mcp"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/background-jobs",
+              "features/usage-tracking",
+              "features/self-awareness",
+              "features/codex-proposals"
+            ]
+          },
+          {
+            "group": "Providers",
+            "pages": [
+              "providers/codex",
+              "providers/azure",
+              "providers/openai-compatible"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/cli",
+              "reference/api",
+              "reference/env"
+            ]
+          }
+        ]
+      }
+    ]
+  }
 }
