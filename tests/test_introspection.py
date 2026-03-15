@@ -4,26 +4,27 @@ from pathlib import Path
 
 import pytest
 
-from synapse.introspection import (
-    RuntimeIntrospector,
-)
-from synapse.capabilities import DEFAULT_CAPABILITY_REGISTRY
+from synapse.introspection import RuntimeIntrospector
 from synapse.plugins.registry import PluginRegistry
 from synapse.plugins.types import PluginKind, PluginManifest, PluginRecord
 from synapse.skills import SkillRegistry
 
 
-def test_introspector_discovers_capabilities():
+def test_introspector_discovers_capabilities(tmp_path: Path):
+    skill_dir = tmp_path / "gws-gmail"
+    skill_dir.mkdir()
+    (skill_dir / "manifest.json").write_text('{"id":"gws-gmail","name":"Gmail","description":"Gmail ops","capabilities":["gws.gmail.send","gws.gmail.search"]}')
+    (skill_dir / "SKILL.md").write_text("# Gmail Skill")
+    skill_registry = SkillRegistry(tmp_path)
+    skill_registry.load()
+
     introspector = RuntimeIntrospector(
-        capability_registry=DEFAULT_CAPABILITY_REGISTRY,
         plugin_registry=PluginRegistry(),
-        skill_registry=SkillRegistry(Path("/nonexistent")),
+        skill_registry=skill_registry,
     )
     caps = introspector.discover_capabilities()
     assert "gws.gmail.send" in caps
-    assert "memory.read" in caps
-    assert "shell.exec" in caps
-    assert len(caps) > 10
+    assert len(caps) >= 2
 
 
 def test_introspector_discovers_plugins():
@@ -36,7 +37,6 @@ def test_introspector_discovers_plugins():
         )
     )
     introspector = RuntimeIntrospector(
-        capability_registry=DEFAULT_CAPABILITY_REGISTRY,
         plugin_registry=registry,
         skill_registry=SkillRegistry(Path("/nonexistent")),
     )
@@ -57,7 +57,6 @@ def test_introspector_discovers_skills(tmp_path: Path):
     skill_registry.load()
 
     introspector = RuntimeIntrospector(
-        capability_registry=DEFAULT_CAPABILITY_REGISTRY,
         plugin_registry=PluginRegistry(),
         skill_registry=skill_registry,
     )
@@ -69,7 +68,6 @@ def test_introspector_discovers_skills(tmp_path: Path):
 
 def test_introspector_discover_limitations():
     introspector = RuntimeIntrospector(
-        capability_registry=DEFAULT_CAPABILITY_REGISTRY,
         plugin_registry=PluginRegistry(),
         skill_registry=SkillRegistry(Path("/nonexistent")),
     )
@@ -81,7 +79,6 @@ def test_introspector_discover_limitations():
 
 def test_introspector_build_architecture():
     introspector = RuntimeIntrospector(
-        capability_registry=DEFAULT_CAPABILITY_REGISTRY,
         plugin_registry=PluginRegistry(),
         skill_registry=SkillRegistry(Path("/nonexistent")),
     )
@@ -90,3 +87,4 @@ def test_introspector_build_architecture():
     assert "Gateway" in names
     assert "Store" in names
     assert "PluginSystem" in names
+    assert "ToolRegistry" in names

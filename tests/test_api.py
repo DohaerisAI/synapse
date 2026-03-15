@@ -67,7 +67,8 @@ async def test_telegram_webhook_creates_run_and_health_snapshot(tmp_path, monkey
 
 
 @pytest.mark.anyio
-async def test_approval_endpoint_executes_pending_action(tmp_path, monkeypatch) -> None:
+async def test_slash_command_executes_directly(tmp_path, monkeypatch) -> None:
+    """Slash commands execute directly without broker approval in the new pipeline."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     runtime = build_runtime(tmp_path)
     app = create_app(runtime)
@@ -84,11 +85,8 @@ async def test_approval_endpoint_executes_pending_action(tmp_path, monkeypatch) 
                 "text": "/remember-global ops note",
             },
         )
-        approval_id = created.json()["approval_id"]
-
-        approved = await client.post(f"/api/approvals/{approval_id}/approve")
-        assert approved.status_code == 200
-        assert approved.json()["status"] == "COMPLETED"
+        assert created.status_code == 200
+        assert created.json()["status"] == "COMPLETED"
 
         approvals = await client.get("/api/approvals")
         assert approvals.status_code == 200

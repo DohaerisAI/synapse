@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .capabilities import DEFAULT_CAPABILITY_REGISTRY
 from .diagnosis import DiagnosisEngine
 from .gws import GWSBridge
 from .integrations import IntegrationRegistry
@@ -134,7 +133,7 @@ class HostExecutor:
             return ExecutionResult(action=action.action, success=True, detail=f"integration applied: {record.integration_id}", artifacts={"integration": record.model_dump()},
             )
         if action.action == "capabilities.read":
-            return ExecutionResult(action=action.action, success=True, detail="capabilities loaded", artifacts={"summary": DEFAULT_CAPABILITY_REGISTRY.user_bundle()},
+            return ExecutionResult(action=action.action, success=True, detail="capabilities loaded", artifacts={"summary": self.skills.capability_bundle()},
             )
         if action.action == "web.search":
             query = str(action.payload.get("query", "")).strip()

@@ -12,6 +12,7 @@ from .steps import (
     step_agent,
     step_gws,
     step_heartbeat,
+    step_mcp,
     step_provider,
     step_server,
     step_telegram,
@@ -137,6 +138,7 @@ def _advanced_flow(
     if not skip_gws:
         env = step_gws(prompter, env)
 
+    env = step_mcp(prompter, env, root)
     env = step_heartbeat(prompter, env)
     env = step_server(prompter, env)
     return env

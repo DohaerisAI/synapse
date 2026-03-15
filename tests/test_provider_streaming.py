@@ -75,9 +75,9 @@ class TestAzureOpenAIProviderStream:
         provider = AzureOpenAIProvider(profile, client=client)
         sink = NullSink()
         result = await provider.generate_stream([], sink=sink)
-        assert "Hello" in result
-        assert "world" in result
-        assert sink.accumulated_text == result
+        assert "Hello" in result.text
+        assert "world" in result.text
+        assert sink.accumulated_text == result.text
 
     @pytest.mark.asyncio
     async def test_generate_stream_without_sink_returns_text(self) -> None:
@@ -96,7 +96,7 @@ class TestAzureOpenAIProviderStream:
         profile = _auth_profile()
         provider = AzureOpenAIProvider(profile, client=client)
         result = await provider.generate_stream([])
-        assert result == "Just text"
+        assert result.text == "Just text"
 
 
 # ---------------------------------------------------------------------------
@@ -137,8 +137,8 @@ class TestCodexResponsesProviderStream:
             [{"role": "user", "content": "hi"}],
             sink=sink,
         )
-        assert "Hi" in result
-        assert "there" in result
+        assert "Hi" in result.text
+        assert "there" in result.text
         assert sink.accumulated_text == "Hi there"
 
 

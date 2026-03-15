@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from synapse.capabilities import DEFAULT_CAPABILITY_REGISTRY
 from synapse.diagnosis import DiagnosisEngine
 from synapse.executors import HostExecutor
 from synapse.introspection import RuntimeIntrospector
@@ -46,20 +45,6 @@ def test_workspace_context_includes_self(tmp_path: Path):
     assert "Self" in bundle or "Synapse" in bundle
 
 
-# --- Capability registry has self.* and diagnosis.* ---
-
-
-def test_self_capabilities_registered():
-    assert DEFAULT_CAPABILITY_REGISTRY.get("self.describe") is not None
-    assert DEFAULT_CAPABILITY_REGISTRY.get("self.health") is not None
-    assert DEFAULT_CAPABILITY_REGISTRY.get("self.capabilities") is not None
-    assert DEFAULT_CAPABILITY_REGISTRY.get("self.gaps") is not None
-
-
-def test_diagnosis_capability_registered():
-    assert DEFAULT_CAPABILITY_REGISTRY.get("diagnosis.report") is not None
-
-
 # --- HostExecutor handles self.* and diagnosis.* actions ---
 
 
@@ -83,7 +68,6 @@ def executor_env(tmp_path: Path):
     )
     gws = GWSBridge(enabled=False, binary="gws", allowed_services=set(), env={})
     introspector = RuntimeIntrospector(
-        capability_registry=DEFAULT_CAPABILITY_REGISTRY,
         plugin_registry=PluginRegistry(),
         skill_registry=skills,
     )
@@ -129,7 +113,6 @@ async def test_executor_self_capabilities(executor_env):
     result = await executor.execute(action, session_key="s1", user_id="u1")
     assert result.success
     assert "capabilities" in result.artifacts
-    assert len(result.artifacts["capabilities"]) > 10
 
 
 @pytest.mark.asyncio

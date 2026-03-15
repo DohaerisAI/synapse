@@ -14,6 +14,7 @@ class SkillRegistry:
 
     def load(self) -> dict[str, SkillDefinition]:
         self.skills = {}
+        self._skill_tools: dict[str, list[dict]] = {}
         if not self.root.exists():
             return self.skills
         for skill_dir in sorted(path for path in self.root.iterdir() if path.is_dir()):
@@ -31,7 +32,15 @@ class SkillRegistry:
                 path=str(instruction_path),
                 capabilities=list(manifest.get("capabilities", [])),
             )
+            # Store optional tools from manifest for auto-registration
+            tools = manifest.get("tools")
+            if isinstance(tools, list) and tools:
+                self._skill_tools[skill_id] = tools
         return self.skills
+
+    def get_skill_tools(self, skill_id: str) -> list[dict]:
+        """Return the tools array from a skill's manifest, if any."""
+        return self._skill_tools.get(skill_id, [])
 
     def get(self, skill_id: str) -> SkillDefinition | None:
         return self.skills.get(skill_id)

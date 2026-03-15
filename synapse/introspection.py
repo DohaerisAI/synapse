@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from .capabilities import CapabilityRegistry
 from .plugins.registry import PluginRegistry
 from .self_model import Architecture, ComponentInfo, Limitation
 from .skills import SkillRegistry
@@ -12,16 +11,20 @@ class RuntimeIntrospector:
     def __init__(
         self,
         *,
-        capability_registry: CapabilityRegistry,
         plugin_registry: PluginRegistry,
         skill_registry: SkillRegistry,
+        # Legacy kwarg accepted but ignored
+        capability_registry: Any = None,
     ) -> None:
-        self._capabilities = capability_registry
         self._plugins = plugin_registry
         self._skills = skill_registry
 
     def discover_capabilities(self) -> list[str]:
-        return [d.action for d in self._capabilities._definitions]
+        """Return skill-based capabilities."""
+        caps: list[str] = []
+        for skill in self._skills.skills.values():
+            caps.extend(skill.capabilities)
+        return caps
 
     def discover_plugins(self) -> list[dict[str, Any]]:
         return [
@@ -75,12 +78,10 @@ class RuntimeIntrospector:
             components=[
                 ComponentInfo(
                     name="Gateway",
-                    role="Central orchestration engine",
+                    role="Central orchestration with ReAct tool-calling loop",
                     module="synapse.gateway",
                     sub_components=[
-                        "planner", "gws_planner", "context", "executor",
-                        "approval", "ingest", "agent_loop", "extractors",
-                        "renderer", "state",
+                        "context", "planner", "ingest", "extractors", "state",
                     ],
                 ),
                 ComponentInfo(
@@ -94,9 +95,9 @@ class RuntimeIntrospector:
                     module="synapse.memory",
                 ),
                 ComponentInfo(
-                    name="CapabilityBroker",
-                    role="Policy decisions for action approval",
-                    module="synapse.broker",
+                    name="ToolRegistry",
+                    role="Native tool calling for ReAct loop",
+                    module="synapse.tools",
                 ),
                 ComponentInfo(
                     name="PluginSystem",

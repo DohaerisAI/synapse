@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import socket
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from .validators import (
     api_base_url,
@@ -297,9 +297,10 @@ def step_telegram(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, st
     """Prompt for Telegram bot configuration."""
     prompter.section(3, "Telegram")
 
+    existing_token = env.get("TELEGRAM_BOT_TOKEN", "").strip()
     enabled = prompter.confirm(
         "Enable Telegram channel?",
-        default=bool(env.get("TELEGRAM_BOT_TOKEN", "").strip()),
+        default=bool(existing_token),
     )
     if not enabled:
         return {
@@ -308,10 +309,13 @@ def step_telegram(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, st
             "TELEGRAM_POLLING_ENABLED": "0",
         }
 
-    token = prompter.password(
-        "Telegram bot token:",
-        validate=telegram_token,
-    )
+    if existing_token:
+        masked = existing_token[:6] + "..." + existing_token[-4:]
+        prompter.note(f"Using existing bot token: {masked}", title="Telegram")
+        change = prompter.confirm("Change token?", default=False)
+        token = prompter.password("Telegram bot token:", validate=telegram_token) if change else existing_token
+    else:
+        token = prompter.password("Telegram bot token:", validate=telegram_token)
 
     # Live probe
     probe_ok = _probe_telegram_token(token)
@@ -396,7 +400,7 @@ def step_gws(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, str]:
 
 def step_heartbeat(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, str]:
     """Prompt for heartbeat configuration."""
-    prompter.section(5, "Heartbeat")
+    prompter.section(6, "Heartbeat")
 
     enabled = prompter.confirm(
         "Enable heartbeat?",
@@ -443,7 +447,7 @@ def step_heartbeat(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, s
 
 def step_server(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, str]:
     """Prompt for server host/port configuration."""
-    prompter.section(6, "Server")
+    prompter.section(7, "Server")
 
     host = prompter.text(
         "Server host:",
@@ -468,6 +472,249 @@ def step_server(prompter: WizardPrompter, env: dict[str, str]) -> dict[str, str]
         )
 
     return {**env, "SERVER_HOST": host, "SERVER_PORT": port}
+
+
+# -- MCP / Financial Services -------------------------------------------------
+
+
+_MCP_SERVICES = {
+    "kite": {
+        "server_id": "kite",
+        "url": "https://mcp.kite.trade/mcp",
+        "auth_type": "oauth",
+        "label": "Zerodha Kite",
+        "hint": "Equity/MF holdings, positions, margins, GTT orders",
+        "needs_token": True,
+        "token_prompt": "Kite API key/token:",
+    },
+    "tradingview": {
+        "server_id": "tradingview",
+        "url": "https://mcp.tradingviewapi.com/mcp",
+        "auth_type": "jwt",
+        "label": "TradingView Data",
+        "hint": "Prices, quotes, TA scores, calendar, news (needs RapidAPI key)",
+        "needs_token": True,
+        "token_prompt": "TradingView RapidAPI key:",
+    },
+}
+
+
+def step_mcp(prompter: WizardPrompter, env: dict[str, str], root: Path) -> dict[str, str]:
+    """Prompt for MCP financial services configuration."""
+    prompter.section(5, "Financial Services (MCP)")
+
+    # Read existing mcp.yaml to detect already-configured services
+    existing = _read_existing_mcp(root)
+    existing_ids = set(existing.keys())
+
+    has_existing = bool(existing_ids & set(_MCP_SERVICES.keys()))
+    enabled = prompter.confirm(
+        "Enable financial services? (portfolio, MF, charts, trading)",
+        default=has_existing,
+    )
+    if not enabled:
+        return {**env, "_MCP_ENABLED": "0"}
+
+    # Pre-select only services that are already configured — no defaults
+    auto_defaults = list(existing_ids & set(_MCP_SERVICES.keys()))
+
+    selected = prompter.multi_select(
+        "Which financial services to connect?",
+        options=[
+            (svc["label"], key, svc["hint"])
+            for key, svc in _MCP_SERVICES.items()
+        ],
+        defaults=auto_defaults,
+    )
+
+    if not selected:
+        prompter.note("No services selected. Skipping MCP setup.", title="MCP")
+        return {**env, "_MCP_ENABLED": "0"}
+
+    # Collect auth tokens — skip services that already have tokens
+    tokens: dict[str, str] = {}
+    for key in selected:
+        svc = _MCP_SERVICES.get(key)
+        if not svc or not svc.get("needs_token"):
+            continue
+        existing_token = existing.get(key, {}).get("token", "")
+        if existing_token:
+            prompter.note(f"{svc['label']}: using existing token.", title="MCP")
+            tokens[key] = existing_token
+        else:
+            token = prompter.password(svc["token_prompt"])
+            tokens[key] = token
+
+    # Run OAuth for stdio services (e.g. Upstox via mcp-remote)
+    is_interactive = not hasattr(prompter, "_answers")
+    for key in selected:
+        svc = _MCP_SERVICES.get(key)
+        if not svc or svc.get("transport", "http") != "stdio":
+            continue
+        if is_interactive and prompter.confirm(
+            f"Authenticate {svc.get('label', key)} now via browser?", default=True
+        ):
+            _run_stdio_oauth(prompter, svc)
+
+    # Generate mcp.yaml
+    _write_mcp_yaml(root, selected, tokens)
+    prompter.note(f"MCP config written to {root / 'mcp.yaml'}", title="MCP")
+
+    return {**env, "_MCP_ENABLED": "1"}
+
+
+def _run_stdio_oauth(prompter: WizardPrompter, svc: dict[str, Any]) -> None:
+    """Run mcp-remote for a stdio service to complete OAuth in the terminal.
+
+    Launches the bridge process, waits for the user to authorize in their
+    browser, then shuts it down. The bridge caches the OAuth token locally
+    so subsequent server starts reuse it without re-auth.
+    """
+    import subprocess
+    import threading
+
+    label = svc.get("label", svc["server_id"])
+    command = svc.get("command", "npx mcp-remote")
+    url = svc.get("url", "")
+    cmd_parts = command.split() + [url]
+
+    # Kill any stale mcp-remote process holding the callback port
+    try:
+        import signal
+        result = subprocess.run(
+            ["lsof", "-ti:24802"], capture_output=True, text=True, timeout=3,
+        )
+        for pid in result.stdout.strip().split():
+            if pid.isdigit():
+                import os
+                os.kill(int(pid), signal.SIGKILL)
+    except Exception:
+        pass
+
+    prompter.note(
+        f"Launching {label} OAuth... A browser will open for login.\n"
+        f"Complete the authorization, then come back here.",
+        title=label,
+    )
+
+    # Run mcp-remote, stream stderr so user sees the auth URL
+    try:
+        proc = subprocess.Popen(
+            cmd_parts,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        prompter.note(
+            f"Command not found: {cmd_parts[0]}. Install with: npm i -g mcp-remote",
+            title=label,
+        )
+        return
+
+    # Print stderr in a background thread so user sees the auth URL
+    def _drain_stderr():
+        for line in proc.stderr:
+            text = line.decode("utf-8", errors="replace").strip()
+            if text:
+                print(f"  [{label}] {text}")
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    # Send initialize to kick off the OAuth flow
+    init_msg = (
+        '{"jsonrpc":"2.0","id":1,"method":"initialize",'
+        '"params":{"protocolVersion":"2025-03-26","capabilities":{},'
+        '"clientInfo":{"name":"synapse","version":"0.1.0"}}}\n'
+    )
+    try:
+        proc.stdin.write(init_msg.encode())
+        proc.stdin.flush()
+    except Exception:
+        pass
+
+    # Wait for the response (user completes OAuth in browser)
+    prompter.note(
+        "Waiting for OAuth... Complete login in your browser, then press Enter here.",
+        title=label,
+    )
+    try:
+        input("  Press Enter after completing login → ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+    # Check if we got a response (token cached)
+    try:
+        # Read whatever stdout has
+        proc.stdin.close()
+        stdout_data = proc.stdout.read(4096)
+        if stdout_data:
+            prompter.note(f"OAuth completed — token cached for {label}.", title=label)
+        else:
+            prompter.note(f"OAuth may not have completed. You can retry later.", title=label)
+    except Exception:
+        prompter.note(f"OAuth may not have completed. You can retry later.", title=label)
+
+    # Kill the bridge process — we just needed it for auth
+    try:
+        proc.terminate()
+        proc.wait(timeout=3)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _read_existing_mcp(root: Path) -> dict[str, dict[str, str]]:
+    """Read existing mcp.yaml and return {server_id: {token, auth_type}} map."""
+    mcp_path = root / "mcp.yaml"
+    if not mcp_path.exists():
+        return {}
+    try:
+        import yaml
+        data = yaml.safe_load(mcp_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for conn in data.get("connections", []):
+        if not isinstance(conn, dict):
+            continue
+        sid = conn.get("server_id", "")
+        auth = conn.get("auth", {})
+        if isinstance(auth, dict):
+            result[sid] = {
+                "token": auth.get("token", ""),
+                "auth_type": auth.get("auth_type", "none"),
+            }
+    return result
+
+
+def _write_mcp_yaml(root: Path, selected: list[str], tokens: dict[str, str]) -> None:
+    """Write mcp.yaml from wizard selections."""
+    lines = ["enabled: true", "connections:"]
+    for key in selected:
+        svc = _MCP_SERVICES.get(key)
+        if svc is None:
+            continue
+        lines.append(f"  - server_id: {svc['server_id']}")
+        lines.append(f"    url: \"{svc['url']}\"")
+        transport = svc.get("transport", "http")
+        if transport != "http":
+            lines.append(f"    transport: {transport}")
+            command = svc.get("command", "")
+            if command:
+                lines.append(f"    command: \"{command}\"")
+        lines.append(f"    auth:")
+        lines.append(f"      auth_type: {svc['auth_type']}")
+        token = tokens.get(key, "")
+        if token:
+            lines.append(f"      token: \"{token}\"")
+        lines.append(f"    enabled: true")
+    (root / "mcp.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # -- Helpers ------------------------------------------------------------------

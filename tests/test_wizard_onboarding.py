@@ -153,7 +153,7 @@ class TestQuickstartFlow:
 
 class TestAdvancedFlow:
     def test_full_advanced_all_disabled(self, tmp_root: Path):
-        """Advanced flow with telegram/gws/heartbeat all disabled."""
+        """Advanced flow with telegram/gws/mcp/heartbeat all disabled."""
         answers = [
             # step_agent
             "Synapse", "",
@@ -162,6 +162,8 @@ class TestAdvancedFlow:
             # step_telegram
             False,           # enable? no
             # step_gws
+            False,           # enable? no
+            # step_mcp
             False,           # enable? no
             # step_heartbeat
             False,           # enable? no
@@ -186,6 +188,7 @@ class TestAdvancedFlow:
             *_codex_provider_answers(),
             False,           # telegram disabled
             False,           # gws disabled
+            False,           # mcp disabled
             True,            # heartbeat enabled
             "15",            # interval
             "last",          # target
@@ -210,6 +213,7 @@ class TestAdvancedFlow:
             True,                       # gws enabled
             ["gmail", "calendar"],      # services
             "",                         # gws extra instructions
+            False,                      # mcp disabled
             False,                      # heartbeat disabled
             "127.0.0.1", "8000",
         ]
@@ -227,7 +231,7 @@ class TestAdvancedFlow:
         answers = [
             "Bot", "",
             *_azure_provider_answers(),
-            False, False, False,
+            False, False, False, False,
             "127.0.0.1", "8000",
         ]
         prompter = MockPrompter(answers)
@@ -247,7 +251,7 @@ class TestAdvancedFlow:
         answers = [
             "Bot", "",
             *_custom_provider_answers(),
-            False, False, False,
+            False, False, False, False,
             "127.0.0.1", "8000",
         ]
         prompter = MockPrompter(answers)
@@ -321,7 +325,9 @@ class TestSkipFlags:
             "Bot", "",
             *_codex_provider_answers(),
             # no telegram prompt
-            False, False,
+            False,           # gws disabled
+            False,           # mcp disabled
+            False,           # heartbeat disabled
             "127.0.0.1", "8000",
         ]
         prompter = MockPrompter(answers)
@@ -338,6 +344,7 @@ class TestSkipFlags:
             *_codex_provider_answers(),
             False,  # telegram
             # no gws prompt
+            False,  # mcp disabled
             False,  # heartbeat
             "127.0.0.1", "8000",
         ]
@@ -371,7 +378,7 @@ class TestExistingConfig:
             "reset",
             "NewBot", "",
             *_codex_provider_answers(),
-            False, False, False,
+            False, False, False, False,
             "127.0.0.1", "8000",
         ]
         prompter = MockPrompter(answers)
@@ -389,7 +396,7 @@ class TestExistingConfig:
             "update",
             "OldBot", "",
             *_codex_provider_answers(),
-            False, False, False,
+            False, False, False, False,
             "127.0.0.1", "8000",
         ]
         prompter = MockPrompter(answers)

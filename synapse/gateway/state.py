@@ -34,7 +34,18 @@ class StateManager:
         execution_results: list[dict[str, Any]],
         workflow: WorkflowPlan,
     ) -> str:
-        return await self._gw.renderer.build_reply(run, event, execution_results, workflow)
+        """Build a simple reply from execution results (inline, no LLM renderer)."""
+        if not execution_results:
+            return "Done."
+        parts: list[str] = []
+        for result in execution_results:
+            action = result.get("action", "unknown")
+            detail = result.get("detail", "")
+            if result.get("success"):
+                parts.append(f"{action}: {detail}" if detail else action)
+            else:
+                parts.append(f"{action} failed: {detail}" if detail else f"{action} failed")
+        return "\n".join(parts)
 
     def finalize_reply_text(
         self,
@@ -57,16 +68,14 @@ class StateManager:
         current = self.transition(run, current, RunState.COMPLETED, {"completed": True})
         gw.memory.write_summary(
             run.session_key,
-            "\n".join(
-                [
-                    f"# Session Summary",
-                    "",
-                    f"- Last user message: {event.text}",
-                    f"- Run state: {current.value}",
-                    f"- Actions: {', '.join(action['action'] for action in execution_results) if execution_results else 'none'}",
-                    f"- Reply: {reply_text}",
-                ]
-            ),
+            "\n".join([
+                "# Session Summary",
+                "",
+                f"- Last user message: {event.text}",
+                f"- Run state: {current.value}",
+                f"- Actions: {', '.join(action['action'] for action in execution_results) if execution_results else 'none'}",
+                f"- Reply: {reply_text}",
+            ]),
         )
         self._update_current_task(run, event, workflow, reply_text, execution_results)
         if workflow.skill_ids and any(item["success"] for item in execution_results if item["action"].startswith("gws.")):
@@ -90,73 +99,6 @@ class StateManager:
                 note=note,
             )
         return current
-
-    async def merge_pending_input_payload(
-        self,
-        pending: PendingInputRecord,
-        event: NormalizedInboundEvent,
-        run: RunRecord,
-    ) -> tuple[dict[str, Any], str, WorkflowPlan | None]:
-        gw = self._gw
-        payload = dict(pending.payload)
-        base_event = payload.get("base_event")
-        draft = dict(payload.get("draft", {}))
-        if pending.kind == "skill.gws":
-            original_text = ""
-            if isinstance(base_event, dict):
-                original_text = str(base_event.get("text", "")).strip()
-            planning_text = event.text.strip()
-            if original_text:
-                planning_text = "\n".join(
-                    [
-                        f"Original request: {original_text}",
-                        f"Follow-up details: {event.text.strip()}",
-                    ]
-                )
-            planned = await gw.gws_planner.run_skill_gws_planner(
-                planning_text,
-                draft=draft,
-                skill_ids=[str(item) for item in payload.get("skill_ids", [])],
-                session_key=run.session_key,
-            )
-            if planned is None:
-                return payload, "I couldn't continue that Google Workspace request.", None
-            if planned["status"] == "ask_input":
-                merged_payload = {
-                    "base_event": base_event or event.to_dict(),
-                    "draft": dict(planned.get("draft", draft)),
-                    "skill_ids": [str(item) for item in planned.get("skill_ids", payload.get("skill_ids", []))],
-                }
-                return merged_payload, str(planned.get("prompt", "I still need more details.")).strip(), None
-            if planned["status"] == "workflow":
-                workflow = gw._workflow_from_actions(
-                    str(planned.get("intent", "gws.skill")),
-                    [gw._PlannedAction.from_dict(item) for item in planned.get("actions", [])],
-                    renderer=str(planned.get("renderer", "gws.generic")),
-                    skill_ids=[str(item) for item in planned.get("skill_ids", payload.get("skill_ids", []))],
-                )
-                merged_payload = {
-                    "base_event": base_event or event.to_dict(),
-                    "draft": dict(planned.get("draft", draft)),
-                    "skill_ids": list(workflow.skill_ids),
-                }
-                return merged_payload, "", workflow
-            return payload, "I couldn't continue that Google Workspace request.", None
-        if pending.kind == "agent.loop":
-            base_event = base_event if isinstance(base_event, dict) else event.to_dict()
-            synthetic = event.text.strip()
-            original_text = str(base_event.get("text", "")).strip()
-            if original_text:
-                synthetic = "\n".join(
-                    [
-                        f"Original request: {original_text}",
-                        f"Follow-up details: {event.text.strip()}",
-                    ]
-                )
-            workflow = gw._workflow("chat.respond", [], renderer="default")
-            payload["continuation_text"] = synthetic
-            return payload, "", workflow
-        return payload, "I couldn't continue that request.", None
 
     def _update_current_task(
         self,
