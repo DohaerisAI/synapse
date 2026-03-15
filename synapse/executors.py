@@ -11,9 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .capabilities import DEFAULT_CAPABILITY_REGISTRY
 from .diagnosis import DiagnosisEngine
-from .finance.executor import FinanceExecutor
 from .gws import GWSBridge
 from .integrations import IntegrationRegistry
 from .introspection import RuntimeIntrospector
@@ -53,7 +51,6 @@ class HostExecutor:
         codex_search_runner: Callable[[str], dict[str, Any]] | None = None,
         introspector: RuntimeIntrospector | None = None,
         diagnosis_engine: DiagnosisEngine | None = None,
-        finance_executor: FinanceExecutor | None = None,
     ) -> None:
         self.memory = memory
         self.skills = skills
@@ -65,7 +62,6 @@ class HostExecutor:
         self.codex_search_runner = codex_search_runner
         self.introspector = introspector
         self.diagnosis_engine = diagnosis_engine
-        self.finance_executor = finance_executor
 
     async def execute(self, action: PlannedAction, *, session_key: str, user_id: str) -> ExecutionResult:
         if action.action == "memory.read":
@@ -137,7 +133,7 @@ class HostExecutor:
             return ExecutionResult(action=action.action, success=True, detail=f"integration applied: {record.integration_id}", artifacts={"integration": record.model_dump()},
             )
         if action.action == "capabilities.read":
-            return ExecutionResult(action=action.action, success=True, detail="capabilities loaded", artifacts={"summary": DEFAULT_CAPABILITY_REGISTRY.user_bundle()},
+            return ExecutionResult(action=action.action, success=True, detail="capabilities loaded", artifacts={"summary": self.skills.capability_bundle()},
             )
         if action.action == "web.search":
             query = str(action.payload.get("query", "")).strip()
@@ -149,10 +145,6 @@ class HostExecutor:
                 return ExecutionResult(action=action.action, success=False, detail=f"web search failed: {error}")
             return ExecutionResult(action=action.action, success=True, detail=f"web search completed for: {query}", artifacts=artifacts,
             )
-        if action.action.startswith("finance."):
-            if self.finance_executor is None:
-                return ExecutionResult(action=action.action, success=False, detail="finance module not configured — no MCP connections")
-            return await self.finance_executor.execute(action)
         if action.action.startswith("gws."):
             try:
                 success, detail, artifacts = await self.gws.execute(action.action, action.payload)

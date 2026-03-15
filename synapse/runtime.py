@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import json
 import logging
 import os
 import threading
@@ -15,17 +16,24 @@ logger = logging.getLogger(__name__)
 from .adapters import TelegramAdapter
 from .auth import AuthStore
 from .streaming.telegram_stream import TelegramDraftStream
-from .broker import CapabilityBroker
-from .capabilities import DEFAULT_CAPABILITY_REGISTRY
 from .channels import ChannelRegistry
 from .channels.telegram import TelegramPlugin
 from .config import AppConfig, CONFIG_FIELDS, load_config, merged_runtime_env
 from .diagnosis import DiagnosisEngine
 from .executors import HostExecutor, IsolatedExecutor
 from .hooks import HookRunner
+from .mcp.adapter import MCPAdapter
+from .mcp.registry import MCPRegistry
+from .mcp.stdio_transport import StdioMcpTransport
+from .mcp.transport import HttpMcpTransport
+from .mcp.types import MCPAuth
 from .introspection import RuntimeIntrospector
 from .plugins import PluginRegistry, discover_plugins, load_all as load_all_plugins
 from .gateway import Gateway
+from .tools.registry import ToolDef, ToolRegistry, ToolResult
+from .tools.builtins import register_builtin_tools
+from .tools.mcp_tools import _mcp_approval_policy
+from .approvals import ApprovalManager
 from .gws import DEFAULT_GWS_ALLOWED_SERVICES, GWSBridge
 from .identifiers import derive_session_key
 from .integrations import IntegrationRegistry
@@ -45,7 +53,6 @@ class Runtime:
     memory: MemoryStore
     skills: SkillRegistry
     auth: AuthStore
-    broker: CapabilityBroker
     integrations: IntegrationRegistry
     gateway: Gateway
     telegram: TelegramAdapter
@@ -55,7 +62,7 @@ class Runtime:
     gws: GWSBridge
     workspace: WorkspaceStore
     env: dict[str, str]
-    introspector: RuntimeIntrospector | None = None
+    mcp_registry: MCPRegistry | None = None
     diagnosis_engine: DiagnosisEngine | None = None
     background_services_owned: bool = False
     background_services_started: bool = False
@@ -94,6 +101,7 @@ class Runtime:
             self.background_services_started = False
             return
         self._reset_transient_state(reason="startup")
+        self._connect_mcp_servers()
         self.telegram.set_handlers(
             inbound_handler=self.handle_telegram_event,
             health_handler=self.store.upsert_adapter_health,
@@ -109,6 +117,7 @@ class Runtime:
             self.background_services_started = False
             return
         self._stop_heartbeat_scheduler()
+        self._disconnect_mcp_servers()
         self.telegram.stop()
         self._reset_transient_state(reason="shutdown")
         self.background_services_owned = False
@@ -172,6 +181,7 @@ class Runtime:
             "approvals": [approval.__dict__ if hasattr(approval, "__dict__") else approval for approval in self.store.list_pending_approvals()],
             "telegram": self.telegram.status_snapshot(),
             "gws": self.gws.status(),
+            "mcp": [info.model_dump() for info in self.mcp_registry.list_connected()] if self.mcp_registry else [],
             "workspace": self.workspace.snapshot(),
             "config": {field: self.env.get(field, "") for field in CONFIG_FIELDS},
             "agent_name": self.gateway.agent_name,
@@ -283,6 +293,105 @@ class Runtime:
                     last_error=str(error),
                 )
         return delivered
+
+    def _connect_mcp_servers(self) -> None:
+        """Connect to configured MCP servers (best-effort, non-blocking).
+
+        Detects whether we're inside a running event loop (e.g. uvicorn lifespan)
+        and uses the appropriate async strategy.
+        """
+        if self.mcp_registry is None or not self.config.mcp.enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(self._async_connect_mcp_servers())
+        else:
+            asyncio.run(self._async_connect_mcp_servers())
+
+    async def _async_connect_mcp_servers(self) -> None:
+        """Async implementation of MCP server connection."""
+        if self.mcp_registry is None:
+            return
+        for conn in self.config.mcp.connections:
+            if not conn.enabled:
+                continue
+            adapter = MCPAdapter(
+                server_id=conn.server_id,
+                url=conn.url,
+                auth=MCPAuth(
+                    auth_type=conn.auth.auth_type,
+                    token=conn.auth.token,
+                    refresh_url=conn.auth.refresh_url,
+                    scopes=list(conn.auth.scopes),
+                ),
+            )
+            if conn.transport == "stdio":
+                cmd_parts = conn.command.split() if conn.command else ["npx", "mcp-remote"]
+                cmd = [*cmd_parts, conn.url]
+                # Pass auth token as --header for mcp-remote (bypasses broken OAuth redirect)
+                if conn.auth.token:
+                    cmd.extend(["--header", f"Authorization:Bearer {conn.auth.token}"])
+                transport = StdioMcpTransport(command=cmd, url=conn.url)
+            else:
+                transport = HttpMcpTransport(
+                    url=conn.url,
+                    auth_token=conn.auth.token,
+                    auth_type=conn.auth.auth_type,
+                )
+            adapter._transport = transport
+            try:
+                await self.mcp_registry.register_adapter(adapter)
+                self.store.upsert_mcp_connection(
+                    server_id=conn.server_id,
+                    url=conn.url,
+                    auth_type=conn.auth.auth_type,
+                    status="connected",
+                )
+                # Register MCP tools into the tool registry
+                if self.gateway.tool_registry is not None:
+                    from .tools.mcp_tools import register_mcp_server_tools
+                    try:
+                        count = await register_mcp_server_tools(
+                            self.gateway.tool_registry, conn.server_id, adapter,
+                        )
+                        logger.info("MCP tools registered: %s (%d tools)", conn.server_id, count)
+                    except Exception:
+                        logger.warning("Failed to register MCP tools for %s", conn.server_id, exc_info=True)
+                logger.info("MCP server connected: %s", conn.server_id)
+            except Exception:
+                logger.warning("MCP server failed to connect: %s (will retry later)", conn.server_id, exc_info=True)
+                self.store.upsert_mcp_connection(
+                    server_id=conn.server_id,
+                    url=conn.url,
+                    auth_type=conn.auth.auth_type,
+                    status="error",
+                )
+
+    def _disconnect_mcp_servers(self) -> None:
+        """Disconnect all MCP servers."""
+        if self.mcp_registry is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(self._async_disconnect_mcp_servers())
+        else:
+            asyncio.run(self._async_disconnect_mcp_servers())
+
+    async def _async_disconnect_mcp_servers(self) -> None:
+        """Async implementation of MCP server disconnection."""
+        if self.mcp_registry is None:
+            return
+        for info in self.mcp_registry.list_connected():
+            try:
+                await self.mcp_registry.unregister(info.server_id)
+            except Exception:
+                logger.warning("MCP disconnect failed: %s", info.server_id, exc_info=True)
 
     def _acquire_service_lock(self) -> bool:
         lock_path = self.config.paths.data_dir / "services.lock"
@@ -421,6 +530,22 @@ class Runtime:
             )
 
 
+def _make_lazy_mcp_tool_fn(mcp_registry: MCPRegistry, server_id: str, tool_name: str):
+    """Create a lazy MCP tool function that looks up the adapter at call time."""
+
+    async def _execute(params, *, ctx=None):
+        adapter = mcp_registry.get(server_id)
+        if adapter is None:
+            return ToolResult(output="", error=f"MCP server '{server_id}' not connected")
+        result = await adapter.call_tool(tool_name, params)
+        if not result.success:
+            return ToolResult(output="", error=result.error or f"{tool_name} failed")
+        output = json.dumps(result.data, indent=2, default=str) if result.data is not None else "ok"
+        return ToolResult(output=output, artifacts={"latency_ms": result.latency_ms})
+
+    return _execute
+
+
 def build_runtime(root: Path | None = None) -> Runtime:
     resolved_root = root if root is not None else Path.cwd()
     env = merged_runtime_env(resolved_root, dict(os.environ))
@@ -440,7 +565,6 @@ def build_runtime(root: Path | None = None) -> Runtime:
         env=env,
     )
     store = SQLiteStore(config.paths.sqlite_path)
-    broker = CapabilityBroker()
     hooks = HookRunner()
     model_router = ModelRouter(auth, workdir=str(config.paths.root))
     allowed_services = {
@@ -470,17 +594,56 @@ def build_runtime(root: Path | None = None) -> Runtime:
     discovered = discover_plugins(*plugin_search_paths)
     load_all_plugins(discovered, plugin_registry)
     introspector = RuntimeIntrospector(
-        capability_registry=DEFAULT_CAPABILITY_REGISTRY,
         plugin_registry=plugin_registry,
         skill_registry=skills,
     )
     diagnosis_engine = DiagnosisEngine(store=store)
+    mcp_registry: MCPRegistry | None = None
+    if config.mcp.enabled:
+        mcp_registry = MCPRegistry()
+    # Build tool registry (ReAct loop path)
+    tool_registry = ToolRegistry()
+    register_builtin_tools(tool_registry)
+    # Auto-register skill tools from manifests
+    for skill_id in skills.skills:
+        skill_tools = skills.get_skill_tools(skill_id)
+        if not skill_tools:
+            continue
+        for tool_spec in skill_tools:
+            mcp_ref = tool_spec.get("mcp", "")  # e.g. "kite.get_holdings"
+            if mcp_ref and mcp_registry is not None:
+                parts = mcp_ref.split(".", 1)
+                if len(parts) == 2:
+                    srv_id, mcp_tool_name = parts
+                    execute_fn = _make_lazy_mcp_tool_fn(mcp_registry, srv_id, mcp_tool_name)
+                    tool_registry.register(ToolDef(
+                        name=f"skill.{skill_id}.{tool_spec['name']}",
+                        description=tool_spec.get("description", ""),
+                        input_schema=tool_spec.get("parameters", {}),
+                        execute=execute_fn,
+                        needs_approval=_mcp_approval_policy(srv_id, mcp_tool_name),
+                        category=f"skill.{skill_id}",
+                    ))
+                    continue
+            # Non-MCP: register with a "load skill first" hint
+            _sid, _name = skill_id, tool_spec.get("name", "")
+            async def _skill_hint(params, *, ctx=None, sid=_sid, name=_name):
+                return ToolResult(output=f"Skill tool '{sid}.{name}' requires loading the skill first. Use load_skill.")
+            tool_registry.register(ToolDef(
+                name=f"skill.{skill_id}.{tool_spec['name']}",
+                description=tool_spec.get("description", ""),
+                input_schema=tool_spec.get("parameters", {}),
+                execute=_skill_hint,
+                category=f"skill.{skill_id}",
+            ))
+    approval_path = config.paths.data_dir / "approvals.json"
+    approval_manager = ApprovalManager(approval_path)
+
     gateway = Gateway(
         store=store,
         memory=memory,
         workspace=workspace,
         skills=skills,
-        broker=broker,
         state_machine=SessionStateMachine(),
         host_executor=HostExecutor(
             memory,
@@ -497,9 +660,11 @@ def build_runtime(root: Path | None = None) -> Runtime:
         model_router=model_router,
         agent_name=config.agent.name,
         assistant_instructions=config.agent.extra_instructions,
-        gws_planner_instructions=config.gws.planner_extra_instructions,
         heartbeat_path=config.paths.root / "HEARTBEAT.md",
         hooks=hooks,
+        tool_registry=tool_registry,
+        approval_manager=approval_manager,
+        diagnosis_engine=diagnosis_engine,
     )
     runtime = Runtime(
         config=config,
@@ -507,7 +672,6 @@ def build_runtime(root: Path | None = None) -> Runtime:
         memory=memory,
         skills=skills,
         auth=auth,
-        broker=broker,
         integrations=integrations,
         gateway=gateway,
         telegram=telegram,
@@ -516,7 +680,7 @@ def build_runtime(root: Path | None = None) -> Runtime:
         hooks=hooks,
         gws=gws,
         workspace=workspace,
-        introspector=introspector,
+        mcp_registry=mcp_registry,
         diagnosis_engine=diagnosis_engine,
         env=env,
         heartbeat_enabled=config.heartbeat.enabled,
