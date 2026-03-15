@@ -78,13 +78,20 @@ class TelegramAdapter:
             raise ValueError("telegram message does not contain supported text or attachments")
         chat = message["chat"]
         sender = message.get("from") or {}
+        metadata: dict[str, Any] = {
+            "update_id": payload.get("update_id"),
+            "attachments": attachments,
+            "chat_type": chat.get("type"),  # private | group | supergroup | channel
+            "message_thread_id": message.get("message_thread_id"),
+            "is_forum": bool(chat.get("is_forum")),
+        }
         return NormalizedInboundEvent(
             adapter="telegram",
             channel_id=str(chat["id"]),
             user_id=str(sender.get("id", chat["id"])),
             message_id=str(message["message_id"]),
             text=text,
-            metadata={"update_id": payload.get("update_id"), "attachments": attachments},
+            metadata=metadata,
         )
 
     def send_text(self, chat_id: str, text: str) -> dict[str, Any]:

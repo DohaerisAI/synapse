@@ -80,13 +80,13 @@ class TelegramDraftStream:
         self._stopped: bool = False
 
         # Draft transport state
-        # NOTE: sendMessageDraft (Bot API 9.5+) is not yet widely supported.
-        # When it "succeeds", it sends a real message rather than an ephemeral
-        # draft, causing double delivery with materialize(). Disabled for now;
-        # use message transport (sendMessage + editMessageText) instead.
-        self._prefer_draft = False
-        self._transport: str = "message"
-        self._draft_id: int | None = None
+        # sendMessageDraft (Bot API 9.5+) gives the smoothest DM experience
+        # (native live preview with no notifications). When unavailable, or when
+        # Telegram unexpectedly materializes it into a real message, we fall back
+        # to message transport to avoid double-delivery.
+        self._prefer_draft = bool(prefer_draft)
+        self._transport: str = "draft" if self._prefer_draft else "message"
+        self._draft_id: int | None = _allocate_draft_id() if self._prefer_draft else None
         self._draft_sent: bool = False
 
         self._loop = DraftStreamLoop(
@@ -236,10 +236,22 @@ class TelegramDraftStream:
         if draft_id is None:
             raise RuntimeError("no draft_id allocated")
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
+        response = await loop.run_in_executor(
             None, lambda: self._adapter.send_draft(self._chat_id, draft_id, text),
         )
         self._draft_sent = True
+
+        # Some Telegram deployments may respond with a real message payload.
+        # If we see a message_id, treat this as message transport from now on
+        # to avoid materialize() sending a duplicate.
+        try:
+            result = response.get("result", {}) if isinstance(response, dict) else {}
+            msg_id = result.get("message_id")
+            if isinstance(msg_id, int):
+                self._message_id = msg_id
+                self._transport = "message"
+        except Exception:
+            pass
 
     async def _send_message(self, text: str) -> None:
         """Send or edit via sendMessage + editMessageText (fallback)."""

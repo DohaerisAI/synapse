@@ -140,7 +140,13 @@ class Runtime:
     async def async_handle_telegram_event(self, event) -> None:
         stream: TelegramDraftStream | None = None
         if getattr(event, "adapter", None) == "telegram" and self.telegram.token:
-            stream = TelegramDraftStream(self.telegram, getattr(event, "channel_id", ""))
+            meta = getattr(event, "metadata", {}) or {}
+            prefer_draft = meta.get("chat_type") == "private"
+            stream = TelegramDraftStream(
+                self.telegram,
+                getattr(event, "channel_id", ""),
+                prefer_draft=bool(prefer_draft),
+            )
             await stream.start()  # Typing heartbeat starts immediately
         try:
             result = await self.gateway.ingest(event, stream_sink=stream)
