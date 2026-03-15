@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "name": "Synapse",
   "description": "A self-hosted agent runtime that knows what it is, knows what it can't do, and gets better.",
-  "theme": "venus",
+  "theme": "mint",
   "logo": {
     "light": "/assets/logo.png",
     "dark": "/assets/logo.png"
