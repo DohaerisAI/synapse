@@ -181,9 +181,31 @@ class TelegramAdapter:
         self._emit_health(status=snapshot["status"], auth_required=not bool(self.token), last_error=self.last_error)
         if not self.token or not self.polling_enabled or self._thread is not None:
             return
+        self._set_bot_commands()
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._poll_loop, name="telegram-poller", daemon=True)
         self._thread.start()
+
+    def _set_bot_commands(self) -> None:
+        """Register bot command menu with Telegram (best-effort)."""
+        if not self.token:
+            return
+        commands = [
+            {"command": "start", "description": "Start a conversation"},
+            {"command": "scan", "description": "Scan for swing trade setups"},
+            {"command": "holdings", "description": "Show Kite holdings"},
+            {"command": "mail", "description": "Check latest email"},
+            {"command": "calendar", "description": "Show calendar agenda"},
+            {"command": "memory", "description": "What do you remember?"},
+            {"command": "help", "description": "What can you do?"},
+        ]
+        try:
+            self.client.post(
+                f"https://api.telegram.org/bot{self.token}/setMyCommands",
+                json={"commands": commands},
+            )
+        except Exception:
+            pass  # best-effort, don't block startup
 
     def stop(self) -> None:
         self._stop_event.set()
