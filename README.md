@@ -100,21 +100,27 @@ The self-model is also injected into every LLM context via `SELF.md` — so the 
          deterministic path       LLM + native tool calling
          planner → executor       load_skill → shell_exec
                │                         │
+               │              [ Operator Layer ]
+               │              policy, grounding,
+               │              fallback defaults
+               │                         │
                │              ┌──────────┼──────────┐
                │              │          │          │
                │        [ Builtins ] [ Skills ]  [ MCP ]
-               │         memory,     21 skills   Kite,
-               │         shell,      gws, swing  external
-               │         web, remind  trader     servers
+               │         memory,     hot-reload  Kite,
+               │         shell, fs,  install     external
+               │         web, codex  proposals   servers
                │              │          │          │
                └──────────────┴──────────┴──────────┘
                             │
-               ┌────────────┼────────────┐
-               │            │            │
-        [ Memory ]    [ SQLite ]   [ Diagnosis ]
-        markdown       runs,        gap analysis,
-        3 scopes       events,      failure patterns
-                       approvals
+               ┌────────────┼──────────────────────┐
+               │            │            │          │
+        [ Memory ]    [ SQLite ]   [ Jobs ]   [ Diagnosis ]
+        markdown       runs,        background  gap analysis,
+        3 scopes       events,      execution   failure patterns
+                       approvals,
+                       jobs, usage,
+                       proposals
 ```
 
 ### Why these decisions
@@ -134,7 +140,7 @@ The self-model is also injected into every LLM context via `SELF.md` — so the 
 
 **Google Workspace** — Gmail (send, search, triage), Calendar (agenda, create), Drive (search, upload), Docs (create, write), Sheets (read, append). The LLM loads GWS skills and calls the `gws` CLI directly.
 
-**Swing Trading** — Scan Nifty 50/500/FnO stocks for setups (inside candle, NR7, volume dry-up, engulfing), full single-stock TA, TKM position sizing. Uses `tradingview_ta` — free, no API key.
+**Swing Trading** — Scan Nifty 50/500/FnO stocks for setups (inside candle, NR7, volume dry-up, engulfing), full single-stock TA, TKM position sizing. Uses `tradingview_ta` — free, no API key. First-class `swing_analyze` and `swing_scan` builtins — no skill load needed.
 
 **Zerodha Kite (MCP)** — Holdings, positions, margins, order history, GTT placement. Connected via MCP protocol with OAuth login.
 
@@ -146,14 +152,26 @@ The self-model is also injected into every LLM context via `SELF.md` — so the 
 
 **Proactive Heartbeat** — Configurable periodic checks during active hours.
 
+**Background Jobs** — Long-running tools (`shell_exec`, `codex_propose`, `codex_run_tests`) run in a background thread, persisted in SQLite, with direct delivery follow-up on completion. Set `background: true` in tool params.
+
+**Skill Hot Reload** — Add, edit, or remove skills in `skills/` and they register without process restart. `POST /api/skills/reload` for manual trigger.
+
+**Skill Install** — Install skill bundles from `.zip` or directory with staging, checksum validation, provenance tracking, and atomic promotion into the live skills tree.
+
+**Codex Proposals** — `codex_propose` generates PLAN.md/PATCH.diff/TESTS.md bundles under `var/proposals/`. `codex_apply_proposal` applies with an approval gate. `codex_run_tests` runs tests in a sandboxed temp dir.
+
+**FS / Repo Tools** — `fs_read`, `fs_write`, `fs_edit` (repo-root enforced), `patch_apply` (approval-gated), `repo_grep`, `repo_open`, `repo_status`, `repo_diffstat`, `repo_diff`.
+
+**Usage Tracking** — Per-provider token and cost tracking. `GET /api/usage/summary`, `/usage` command in Telegram/chat.
+
 **Operator Tooling** — Web console, terminal TUI, `synapse doctor`, structured JSON logging.
 
 **Self-Awareness** — Introspection APIs, diagnosis engine, self-model injection.
 
 ### What It Explicitly Cannot Do (Yet)
 
-- Auto-apply code patches (disabled — proposal only)
-- Real Docker sandboxing (host execution only)
+- Auto-apply code patches without approval (proposal + explicit approval required)
+- Docker sandboxing opt-in (`EXECUTION_ISOLATED_ENABLED=1`), off by default
 - Channels beyond Telegram (Slack, Discord planned)
 - Self-author plugins autonomously (can propose, cannot auto-codegen)
 
@@ -230,6 +248,19 @@ SERVER_PORT=8000
 # Heartbeat (optional)
 HEARTBEAT_ENABLED=1
 HEARTBEAT_EVERY_MINUTES=10
+
+# Background jobs
+JOB_MAX_CONCURRENCY=1
+
+# Execution sandbox (optional, off by default)
+EXECUTION_ISOLATED_ENABLED=0
+EXECUTION_DOCKER_IMAGE=python:3.12-slim
+EXECUTION_TIMEOUT_SECONDS=60
+EXECUTION_MAX_OUTPUT_BYTES=65536
+SKILL_AUTO_INSTALL_DEPS=0
+
+# Usage pricing (optional)
+PRICING_JSON=/path/to/pricing.json
 ```
 
 MCP connections are configured in `mcp.yaml` (gitignored, contains tokens):
@@ -266,21 +297,26 @@ synapse/
   plugins/         plugin SDK — discovery, loading, registry
   wizard/          interactive setup wizard
   streaming/       response streaming with live editing
-  app.py           FastAPI with web console
+  app.py           FastAPI with web console + jobs/usage/skills endpoints
   runtime.py       lifecycle, heartbeat, background services
   react_loop.py    ReAct agent loop with native tool calling
+  operator.py      operator policy layer — defaults, grounding, fallbacks
+  jobs.py          background job substrate (threaded, SQLite-persisted)
+  skill_runtime.py skill hot reload, package install, venv/docker execution
+  codex_tools.py   proposal generation, apply, sandboxed test execution
+  usage.py         per-provider token and cost tracking
   repl.py          terminal chat with streaming
   executors.py     host execution for slash commands
   memory.py        markdown-first durable storage
-  store.py         SQLite — runs, events, approvals
+  store.py         SQLite — runs, events, approvals, jobs, usage, proposals
   self_model.py    typed self-awareness schemas
   introspection.py runtime capability discovery
   diagnosis.py     failure analysis + gap detection
-  approvals.py     tool-level approval gates
+  approvals.py     tool-level approval gates with persistent allowlist
   hooks.py         lifecycle event hooks
-  skills.py        skill registry + matching
-skills/            21 bundled skills (GWS, swing-trader, assistant)
-tests/             340 tests across 28 files
+  skills.py        skill registry + hot reload + metadata parsing
+skills/            bundled skills (GWS, swing-trader, codex, assistant)
+tests/             ~480 tests across 42 files
 ```
 
 ---
@@ -288,7 +324,7 @@ tests/             340 tests across 28 files
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q     # 340 tests
+.venv/bin/python -m pytest -q     # ~480 tests
 ```
 
 ---

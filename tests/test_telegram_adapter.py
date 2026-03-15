@@ -1,3 +1,5 @@
+import pytest
+
 from synapse.adapters import TelegramAdapter
 
 
@@ -103,3 +105,39 @@ def test_telegram_adapter_send_text_preserves_code_blocks() -> None:
     adapter.send_text("22", "```python\nprint('hi')\n```")
 
     assert calls["json"]["text"] == "<pre>print(&#x27;hi&#x27;)</pre>"
+
+
+@pytest.mark.parametrize(
+    ("method_name", "args"),
+    [
+        ("send_text", ("22", "Inline `x` and leaked @@CODE1@@ plus @@PRE2@@")),
+        ("edit_text", ("22", 7, "Inline `x` and leaked @@CODE1@@ plus @@PRE2@@")),
+        ("send_draft", ("22", 9, "Inline `x` and leaked @@CODE1@@ plus @@PRE2@@")),
+    ],
+)
+def test_telegram_outbound_text_never_leaks_placeholder_tokens(method_name: str, args: tuple[object, ...]) -> None:
+    calls: list[dict[str, object]] = []
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class DummyClient:
+        def post(self, url, json=None):  # noqa: A002
+            calls.append({"url": url, "json": json})
+            return DummyResponse()
+
+    adapter = TelegramAdapter(token="token", client=DummyClient())
+
+    getattr(adapter, method_name)(*args)
+
+    payload = calls[-1]["json"]
+    assert payload is not None
+    text = str(payload["text"])
+    assert "@@CODE" not in text
+    assert "@@PRE" not in text
+    assert "@ @CODE1@ @" in text
+    assert "@ @PRE2@ @" in text

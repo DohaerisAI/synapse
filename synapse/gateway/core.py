@@ -21,6 +21,7 @@ from ..models import (
     WorkflowStep,
 )
 from ..providers import ModelRouter
+from ..operator import OperatorLayer
 from ..session import SessionStateMachine
 from ..streaming.sink import StreamSink
 from ..skills import SkillRegistry
@@ -60,6 +61,8 @@ class Gateway:
         tool_registry: "_ToolRegistry | None" = None,
         approval_manager: "_ApprovalManager | None" = None,
         diagnosis_engine: Any = None,
+        command_runner: Any = None,
+        operator_layer: OperatorLayer | None = None,
         # Legacy kwargs accepted but ignored (for backward compat during migration)
         broker: Any = None,
         host_executor: Any = None,
@@ -80,6 +83,8 @@ class Gateway:
         self.tool_registry = tool_registry
         self.approval_manager = approval_manager
         self.diagnosis_engine = diagnosis_engine
+        self.command_runner = command_runner
+        self.operator_layer = operator_layer or OperatorLayer()
 
         # Legacy references kept for tests / ingest handler that still reference them
         self.broker = broker
@@ -139,7 +144,13 @@ class Gateway:
         )
 
         try:
-            return await self._process_run(run, event, session_key, current, stream_sink=stream_sink)
+            result = await self._process_run(run, event, session_key, current, stream_sink=stream_sink)
+            # Preserve the inbound message id for potential reactions.
+            try:
+                setattr(result, "in_reply_to_message_id", event.message_id)
+            except Exception:
+                pass
+            return result
         except Exception:
             try:
                 self.state_manager.transition(run, current, RunState.FAILED, {"detail": "unhandled exception in ingest pipeline"})
@@ -174,6 +185,14 @@ class Gateway:
     ) -> GatewayResult:
         """Handle deterministic slash commands via the planner → executor path."""
         workflow = await self.planner.plan_workflow(event, session_key=session_key)
+        workflow, operator_notes = self.operator_layer.apply(run, event, workflow, self.tool_registry)
+        for note in operator_notes:
+            self.store.append_run_event(
+                run.run_id,
+                session_key,
+                "operator.note",
+                {"note": note, "phase": "workflow.apply"},
+            )
         self.store.append_run_event(run.run_id, session_key, "workflow.planned", workflow.to_dict())
         current = self.state_manager.transition(
             run, current, RunState.PLANNED,
@@ -258,28 +277,10 @@ class Gateway:
         if attachment_summary:
             messages.append({"role": "system", "content": attachment_summary})
 
-        tool_context = ToolContext(
-            session_key=session_key,
-            user_id=run.user_id,
-            memory=self.memory,
-            store=self.store,
-            config=getattr(self, "_config", None),
-            skill_registry=self.skills,
-            diagnosis_engine=self.diagnosis_engine,
-        )
+        tool_context = self._build_tool_context(run)
 
         tools = self.tool_registry.all_tools() if self.tool_registry else []
-
-        class _ChatAdapter:
-            def __init__(self, router: ModelRouter):
-                self._router = router
-
-            async def chat(self, msgs, *, system=None, tools=None, stream_sink=None):
-                return await self._router.chat(
-                    msgs, system_prompt=system, tools=tools, sink=stream_sink,
-                )
-
-        adapter = _ChatAdapter(self.model_router)
+        adapter = self._react_chat_adapter(run_id=run.run_id, session_key=session_key)
         current = self.state_manager.transition(run, current, RunState.EXECUTING, {"mode": "react_loop"})
 
         try:
@@ -293,6 +294,9 @@ class Gateway:
                 max_turns=self.AGENT_LOOP_MAX_TURNS * 2,
                 session_key=session_key,
                 tool_context=tool_context,
+                run_id=run.run_id,
+                approval_event=event.to_dict(),
+                operator_layer=self.operator_layer,
             )
         except Exception as exc:
             self.state_manager.transition(run, current, RunState.FAILED, {"detail": str(exc)})
@@ -302,6 +306,28 @@ class Gateway:
             self.store.append_run_event(
                 run.run_id, session_key, "react.tool_call",
                 {"tool": tc["tool"], "turn": tc.get("turn"), "error": tc.get("error")},
+            )
+
+        if result.pending_approval_id is not None:
+            current = self.state_manager.transition(
+                run,
+                current,
+                RunState.WAITING_APPROVAL,
+                {"approval_id": result.pending_approval_id, "reply": result.reply},
+            )
+            self.memory.append_transcript(session_key, {"role": "assistant", "content": result.reply})
+            self.store.append_run_event(
+                run.run_id,
+                session_key,
+                "run.approval_requested",
+                {"approval_id": result.pending_approval_id, "reply_text": result.reply},
+            )
+            return GatewayResult(
+                run_id=run.run_id,
+                session_key=session_key,
+                status=current.value,
+                reply_text=result.reply,
+                approval_id=result.pending_approval_id,
             )
 
         reply_text = result.reply.strip()
@@ -341,36 +367,174 @@ class Gateway:
         )
 
     async def approve(self, approval_id: str) -> GatewayResult:
-        """Handle approval — kept for ingest handler chat approval flow."""
+        """Handle approval — kept for ingest handler chat approval flow.
+
+        Must not raise: returning an error result is better than wedging the session.
+        """
         approval = self.store.get_approval(approval_id)
         if approval is None:
-            raise KeyError(f"unknown approval id: {approval_id}")
+            return GatewayResult(
+                run_id=approval_id,
+                session_key="",
+                status="error",
+                reply_text="Approval not found.",
+                queued=False,
+            )
         if approval.status is not ApprovalStatus.PENDING:
-            raise ValueError(f"approval {approval_id} is not pending")
+            return GatewayResult(
+                run_id=approval.run_id,
+                session_key=approval.session_key,
+                status="error",
+                reply_text="That approval is not pending anymore.",
+                queued=False,
+            )
+
+        run = self.store.get_run(approval.run_id)
+        if run is None:
+            return GatewayResult(
+                run_id=approval.run_id,
+                session_key=approval.session_key,
+                status="error",
+                reply_text="Associated run not found.",
+                queued=False,
+            )
+
+        try:
+            # Mark approved early so we don't re-prompt.
+            self.store.update_approval_status(approval_id, ApprovalStatus.APPROVED)
+
+            if approval.payload.get("kind") == "react_tool_call":
+                return await self._approve_react_tool_call(approval)
+
+            event = NormalizedInboundEvent.from_dict(approval.payload["event"])
+            workflow_payload = approval.payload.get("workflow")
+            if isinstance(workflow_payload, dict):
+                workflow = WorkflowPlan.from_dict(workflow_payload)
+            else:
+                actions = [PlannedAction.from_dict(item) for item in approval.payload.get("actions", [])]
+                workflow = self._workflow_from_actions("approved-actions", actions)
+
+            pre_approval_results = list(approval.payload.get("pre_approval_results", []))
+            current, execution_results = await self._execute_workflow(run, RunState.WAITING_APPROVAL, workflow)
+            combined_results = list(pre_approval_results) + execution_results
+            reply_text = await self.state_manager.finalize_reply(run, event, current, combined_results, workflow)
+            final_current = self.state_manager.finalize_reply_text(run, event, current, combined_results, workflow, reply_text)
+            await self._drain_queue(run.session_key)
+            return GatewayResult(
+                run_id=run.run_id,
+                session_key=run.session_key,
+                status=final_current.value,
+                reply_text=reply_text,
+                queued=False,
+            )
+        except Exception as exc:
+            # Fail closed: do not wedge the session in WAITING_APPROVAL.
+            self.store.append_run_event(
+                run.run_id,
+                run.session_key,
+                "run.approval_error",
+                {"approval_id": approval_id, "error": str(exc)},
+            )
+            try:
+                self.state_manager.transition(
+                    run,
+                    RunState.WAITING_APPROVAL,
+                    RunState.FAILED,
+                    {"approval_id": approval_id, "error": str(exc)},
+                )
+            except Exception:
+                self.store.set_run_state(run.run_id, RunState.FAILED)
+            await self._drain_queue(run.session_key)
+            return GatewayResult(
+                run_id=run.run_id,
+                session_key=run.session_key,
+                status=RunState.FAILED.value,
+                reply_text="Something went wrong while resuming after approval. Please retry.",
+                queued=False,
+            )
+
+    async def _approve_react_tool_call(self, approval) -> GatewayResult:
+        from ..react_loop import run_react_loop
 
         run = self.store.get_run(approval.run_id)
         if run is None:
             raise KeyError(f"unknown run id: {approval.run_id}")
 
-        event = NormalizedInboundEvent.from_dict(approval.payload["event"])
-        workflow_payload = approval.payload.get("workflow")
-        if isinstance(workflow_payload, dict):
-            workflow = WorkflowPlan.from_dict(workflow_payload)
-        else:
-            actions = [PlannedAction.from_dict(item) for item in approval.payload.get("actions", [])]
-            workflow = self._workflow_from_actions("approved-actions", actions)
-        pre_approval_results = list(approval.payload.get("pre_approval_results", []))
-        self.store.update_approval_status(approval_id, ApprovalStatus.APPROVED)
+        tool_name = str(approval.payload.get("tool_name", "")).strip()
+        tool = None if self.tool_registry is None else self.tool_registry.get(tool_name)
+        if tool is None:
+            raise KeyError(f"unknown tool for approval {approval.approval_id}: {tool_name}")
 
-        current, execution_results = await self._execute_workflow(run, RunState.WAITING_APPROVAL, workflow)
-        combined_results = list(pre_approval_results) + execution_results
-        reply_text = await self.state_manager.finalize_reply(run, event, current, combined_results, workflow)
-        final_current = self.state_manager.finalize_reply_text(run, event, current, combined_results, workflow, reply_text)
+        params = approval.payload.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError(f"invalid params for approval {approval.approval_id}")
+        tool_call_id = str(approval.payload.get("tool_call_id", "")).strip() or "approved-tool-call"
+        messages = list(approval.payload.get("messages", []))
+        event = NormalizedInboundEvent.from_dict(approval.payload["event"])
+        tool_context = self._build_tool_context(run, approval_id=approval.approval_id)
+        tools = self.tool_registry.all_tools() if self.tool_registry else []
+
+        self.store.update_approval_status(approval.approval_id, ApprovalStatus.APPROVED)
+
+        result = await tool.execute(params, ctx=tool_context)
+        content = result.output
+        if result.error:
+            content = json.dumps({"error": result.error, "output": result.output})
+        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
+
+        adapter = self._react_chat_adapter(run_id=run.run_id, session_key=run.session_key)
+        prior_tool_calls = list(approval.payload.get("tool_calls_made", [])) + [
+            {"tool": tool_name, "params": params, "turn": approval.payload.get("turn"), "result": result.output, "error": result.error}
+        ]
+        resumed = await run_react_loop(
+            messages=messages,
+            system_prompt=str(approval.payload.get("system_prompt", "")),
+            tools=tools,
+            model_router=adapter,
+            approval_manager=self.approval_manager,
+            max_turns=self.AGENT_LOOP_MAX_TURNS * 2,
+            session_key=run.session_key,
+            tool_context=tool_context,
+            run_id=run.run_id,
+            approval_event=event.to_dict(),
+            initial_tool_calls_made=prior_tool_calls,
+            operator_layer=self.operator_layer,
+        )
+
+        for tc in resumed.tool_calls_made[len(prior_tool_calls):]:
+            self.store.append_run_event(
+                run.run_id,
+                run.session_key,
+                "react.tool_call",
+                {"tool": tc["tool"], "turn": tc.get("turn"), "error": tc.get("error")},
+            )
+
+        if resumed.pending_approval_id is not None:
+            self.store.set_run_state(run.run_id, RunState.WAITING_APPROVAL)
+            self.memory.append_transcript(run.session_key, {"role": "assistant", "content": resumed.reply})
+            return GatewayResult(
+                run_id=run.run_id,
+                session_key=run.session_key,
+                status=RunState.WAITING_APPROVAL.value,
+                reply_text=resumed.reply,
+                approval_id=resumed.pending_approval_id,
+            )
+
+        reply_text = resumed.reply.strip()
+        current = self.state_manager.transition(run, RunState.WAITING_APPROVAL, RunState.RESPONDING, {"reply": reply_text})
+        self.memory.append_transcript(run.session_key, {"role": "assistant", "content": reply_text})
+        self.store.append_run_event(
+            run.run_id,
+            run.session_key,
+            "run.response",
+            {"reply_text": reply_text, "turns": resumed.turns, "tool_calls": len(resumed.tool_calls_made)},
+        )
+        current = self.state_manager.transition(run, current, RunState.COMPLETED, {"completed": True})
         await self._drain_queue(run.session_key)
         return GatewayResult(
             run_id=run.run_id,
             session_key=run.session_key,
-            status=final_current.value,
+            status=current.value,
             reply_text=reply_text,
         )
 
@@ -433,11 +597,11 @@ class Gateway:
         stripped = text.strip()
         lowered = stripped.lower()
         if not stripped.startswith("/"):
-            return False
+            return lowered == "usage"
         slash_prefixes = (
             "/memory", "/remember-", "/forget-", "/help", "/search ",
             "/shell ", "/fetch ", "/propose-patch ", "/gws ",
-            "/quit", "/exit", "/q", "/mcp", "/events",
+            "/quit", "/exit", "/q", "/mcp", "/events", "/usage",
             "/what-do-you-remember",
         )
         return any(lowered.startswith(p) or lowered == p.rstrip() for p in slash_prefixes)
@@ -445,6 +609,106 @@ class Gateway:
     def _resolved_provider_name(self) -> str | None:
         profile = self.model_router.resolve_profile()
         return None if profile is None else f"{profile.provider}/{profile.model}"
+
+    def _build_tool_context(
+        self,
+        run: RunRecord | None,
+        *,
+        approval_id: str | None = None,
+        override_session_key: str | None = None,
+        override_user_id: str | None = None,
+        override_delivery_target=None,
+        job_id: str | None = None,
+        cancel_event=None,
+        stdout_path: str | None = None,
+        stderr_path: str | None = None,
+    ):
+        from ..tools.registry import ToolContext
+
+        session_key = override_session_key or (None if run is None else run.session_key) or ""
+        user_id = override_user_id or (None if run is None else run.user_id) or ""
+        delivery_target = override_delivery_target
+        if delivery_target is None and run is not None:
+            from ..models import DeliveryTarget
+
+            delivery_target = DeliveryTarget(
+                adapter=run.adapter,
+                channel_id=run.channel_id,
+                user_id=run.user_id,
+            )
+        command_runner = self.command_runner
+        if command_runner is not None and any(item is not None for item in (cancel_event, stdout_path, stderr_path)):
+            base_runner = command_runner
+
+            class _JobCommandRunner:
+                def __init__(self, runner, *, default_cancel_event, default_stdout_path, default_stderr_path):
+                    self._runner = runner
+                    self._default_cancel_event = default_cancel_event
+                    self._default_stdout_path = default_stdout_path
+                    self._default_stderr_path = default_stderr_path
+
+                async def run(self, command, *, cwd=None, env=None, cancel_event=None, stdout_path=None, stderr_path=None):
+                    kwargs = {
+                        "cancel_event": self._default_cancel_event if cancel_event is None else cancel_event,
+                        "stdout_path": self._default_stdout_path if stdout_path is None else stdout_path,
+                        "stderr_path": self._default_stderr_path if stderr_path is None else stderr_path,
+                    }
+                    kwargs = {key: value for key, value in kwargs.items() if value is not None}
+                    return await self._runner.run(command, cwd=cwd, env=env, **kwargs)
+
+                async def run_argv(self, argv, *, cwd=None, env=None, cancel_event=None, stdout_path=None, stderr_path=None):
+                    kwargs = {
+                        "cancel_event": self._default_cancel_event if cancel_event is None else cancel_event,
+                        "stdout_path": self._default_stdout_path if stdout_path is None else stdout_path,
+                        "stderr_path": self._default_stderr_path if stderr_path is None else stderr_path,
+                    }
+                    kwargs = {key: value for key, value in kwargs.items() if value is not None}
+                    return await self._runner.run_argv(argv, cwd=cwd, env=env, **kwargs)
+
+            command_runner = _JobCommandRunner(
+                base_runner,
+                default_cancel_event=cancel_event,
+                default_stdout_path=stdout_path,
+                default_stderr_path=stderr_path,
+            )
+
+        return ToolContext(
+            session_key=session_key,
+            user_id=user_id,
+            memory=self.memory,
+            store=self.store,
+            config=getattr(self, "_config", None),
+            run_id=None if run is None else run.run_id,
+            delivery_target=delivery_target,
+            job_service=getattr(self, "_job_service", None),
+            job_id=job_id,
+            approval_id=approval_id,
+            cancel_event=cancel_event,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            skill_registry=self.skills,
+            command_runner=command_runner,
+            diagnosis_engine=self.diagnosis_engine,
+        )
+
+    def _react_chat_adapter(self, *, run_id: str | None = None, session_key: str | None = None):
+        class _ChatAdapter:
+            def __init__(self, router: ModelRouter, *, current_run_id: str | None, current_session_key: str | None):
+                self._router = router
+                self._run_id = current_run_id
+                self._session_key = current_session_key
+
+            async def chat(self, msgs, *, system=None, tools=None, stream_sink=None):
+                return await self._router.chat(
+                    msgs,
+                    system_prompt=system,
+                    tools=tools,
+                    sink=stream_sink,
+                    run_id=self._run_id,
+                    session_key=self._session_key,
+                )
+
+        return _ChatAdapter(self.model_router, current_run_id=run_id, current_session_key=session_key)
 
     def _resolve_step_action(self, action: PlannedAction, execution_results: list[dict[str, Any]]) -> PlannedAction:
         """Resolve $last. references in action payloads from prior step results."""

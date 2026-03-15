@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from synapse.models import HeartbeatStatus, NormalizedInboundEvent, RunState
+from synapse.models import GatewayResult, HeartbeatStatus, NormalizedInboundEvent, RunState
 from synapse.runtime import build_runtime
 
 
@@ -50,6 +50,49 @@ async def test_runtime_heartbeat_respects_active_hours(tmp_path, monkeypatch) ->
     assert latest is not None
     assert latest.status is HeartbeatStatus.SKIPPED
     assert latest.skip_reason == "outside_active_hours"
+
+
+async def test_runtime_heartbeat_dedupes_identical_messages(tmp_path, monkeypatch) -> None:
+    """Heartbeat should not spam the same message repeatedly."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HEARTBEAT_ENABLED", "1")
+    monkeypatch.setenv("HEARTBEAT_EVERY_MINUTES", "10")
+    runtime = build_runtime(tmp_path)
+
+    # Seed a last delivery target without leaving an active run.
+    seed_event = NormalizedInboundEvent(
+        adapter="telegram",
+        channel_id="22",
+        user_id="44",
+        message_id="seed-1",
+        text="hello",
+    )
+    run = runtime.store.create_run("telegram__22__44", seed_event)
+    runtime.store.set_run_state(run.run_id, RunState.COMPLETED)
+
+    # Monkeypatch gateway.ingest to return the same heartbeat text each time.
+    async def fake_ingest(event):
+        return GatewayResult(
+            run_id=run.run_id,
+            session_key="telegram__22__44",
+            status="COMPLETED",
+            reply_text="Needle: Review your watchlist",
+            queued=False,
+            suppress_delivery=False,
+        )
+
+    runtime.gateway.ingest = fake_ingest  # type: ignore[assignment]
+
+    # Avoid service-lock flakiness in tests: force ownership.
+    runtime.background_services_owned = True
+
+    first = await runtime.maybe_run_heartbeat(now=datetime(2026, 3, 5, 22, 0, tzinfo=UTC))
+    second = await runtime.maybe_run_heartbeat(now=datetime(2026, 3, 5, 22, 10, tzinfo=UTC))
+
+    assert first is not None
+    assert first.suppress_delivery is False
+    assert second is not None
+    assert second.suppress_delivery is True
 
 
 async def test_runtime_clears_queue_and_cancels_active_runs_on_start(tmp_path, monkeypatch) -> None:

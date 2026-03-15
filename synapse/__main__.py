@@ -74,6 +74,13 @@ def main() -> None:
     plugins_p = sub.add_parser("plugins", help="List discovered plugins")
     plugins_p.add_argument("--root", default=".", help="project root")
 
+    # skills
+    skills_p = sub.add_parser("skills", help="Manage skill bundles")
+    skills_sub = skills_p.add_subparsers(dest="skills_action")
+    skills_install = skills_sub.add_parser("install", help="Install a skill bundle from a directory or zip")
+    skills_install.add_argument("path", help="path to skill bundle directory or zip")
+    skills_install.add_argument("--root", default=".", help="project root")
+
     # service
     service_p = sub.add_parser("service", help="Manage systemd service")
     service_sub = service_p.add_subparsers(dest="service_action")
@@ -130,6 +137,10 @@ def main() -> None:
                 print(f"- {manifest.id} ({manifest.kind.value}): {manifest.description or manifest.name}")
         return
 
+    if command == "skills":
+        _handle_skills(args, root)
+        return
+
     if command == "service":
         _handle_service(args, root)
         return
@@ -173,6 +184,20 @@ def _handle_service(args: argparse.Namespace, root: Path) -> None:
     else:
         print("Usage: synapse service {install|uninstall|status}")
         sys.exit(1)
+
+
+def _handle_skills(args: argparse.Namespace, root: Path) -> None:
+    action = getattr(args, "skills_action", None)
+    if action != "install":
+        print("Usage: synapse skills install <path>")
+        sys.exit(1)
+
+    runtime = build_runtime(root)
+    try:
+        summary = runtime.install_skill(str(Path(args.path).resolve()))
+    finally:
+        runtime.shutdown()
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

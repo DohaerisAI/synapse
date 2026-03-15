@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -10,8 +11,9 @@ import httpx
 
 from .attachments import attachment_prompt_context
 from .auth import AuthStore
-from .models import AuthProfile
+from .models import AuthProfile, utc_now
 from .streaming.sink import NullSink, StreamSink
+from .usage import estimate_input_chars, estimate_output_chars
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,10 +39,60 @@ class ModelProvider(Protocol):
         ...
 
 
+def _usage_numbers(usage: dict[str, Any] | None) -> tuple[int | None, int | None, int | None]:
+    if not isinstance(usage, dict):
+        return None, None, None
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    total_tokens = usage.get("total_tokens")
+    return (
+        int(prompt_tokens) if isinstance(prompt_tokens, int) else None,
+        int(completion_tokens) if isinstance(completion_tokens, int) else None,
+        int(total_tokens) if isinstance(total_tokens, int) else None,
+    )
+
+
+def _record_usage_event(
+    store: Any,
+    *,
+    run_id: str | None,
+    session_key: str | None,
+    provider: str,
+    model: str,
+    input_chars: int,
+    output_chars: int,
+    started_at: str,
+    duration_ms: int,
+    usage: dict[str, Any] | None = None,
+    status: str = "ok",
+    error: str | None = None,
+) -> None:
+    if store is None:
+        return
+    prompt_tokens, completion_tokens, total_tokens = _usage_numbers(usage)
+    store.append_usage_event(
+        run_id=run_id,
+        session_key=session_key,
+        provider=provider,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        input_chars=input_chars,
+        output_chars=output_chars,
+        started_at=started_at,
+        finished_at=utc_now().isoformat(),
+        duration_ms=duration_ms,
+        status=status,
+        error=error,
+    )
+
+
 class AzureOpenAIProvider:
-    def __init__(self, profile: AuthProfile, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(self, profile: AuthProfile, client: httpx.AsyncClient | None = None, *, store: Any | None = None) -> None:
         self.profile = profile
         self.client = client or httpx.AsyncClient(timeout=20.0)
+        self.store = store
 
     def _build_request(
         self,
@@ -92,19 +144,55 @@ class AzureOpenAIProvider:
         *,
         system_prompt: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
     ) -> LLMResponse:
+        started_at = utc_now().isoformat()
+        started_perf = time.perf_counter()
+        input_chars = estimate_input_chars(messages, system_prompt=system_prompt, tools=tools)
         url, headers, body = self._build_request(
             messages, system_prompt=system_prompt, tools=tools,
         )
-        response = await self.client.post(url, headers=headers, json=body)
-        response.raise_for_status()
-        payload = response.json()
-        message = payload["choices"][0]["message"]
-        return LLMResponse(
-            text=message.get("content"),
-            tool_calls=self._parse_tool_calls(message),
-            usage=payload.get("usage"),
-        )
+        response_payload: dict[str, Any] | None = None
+        try:
+            response = await self.client.post(url, headers=headers, json=body)
+            response.raise_for_status()
+            response_payload = response.json()
+            message = response_payload["choices"][0]["message"]
+            result = LLMResponse(
+                text=message.get("content"),
+                tool_calls=self._parse_tool_calls(message),
+                usage=response_payload.get("usage"),
+            )
+            _record_usage_event(
+                self.store,
+                run_id=run_id,
+                session_key=session_key,
+                provider=self.profile.provider,
+                model=self.profile.model,
+                input_chars=input_chars,
+                output_chars=estimate_output_chars(result.text, result.tool_calls),
+                started_at=started_at,
+                duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                usage=response_payload.get("usage"),
+            )
+            return result
+        except Exception as exc:
+            _record_usage_event(
+                self.store,
+                run_id=run_id,
+                session_key=session_key,
+                provider=self.profile.provider,
+                model=self.profile.model,
+                input_chars=input_chars,
+                output_chars=0,
+                started_at=started_at,
+                duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                usage=None if response_payload is None else response_payload.get("usage"),
+                status="error",
+                error=str(exc),
+            )
+            raise
 
     async def generate_stream(
         self,
@@ -113,69 +201,102 @@ class AzureOpenAIProvider:
         system_prompt: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         sink: StreamSink | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
     ) -> LLMResponse:
         """Generate with streaming SSE. Push deltas to sink. Return LLMResponse."""
         effective_sink = sink or NullSink()
+        started_at = utc_now().isoformat()
+        started_perf = time.perf_counter()
+        input_chars = estimate_input_chars(messages, system_prompt=system_prompt, tools=tools)
         url, headers, body = self._build_request(
             messages, system_prompt=system_prompt, tools=tools, stream=True,
         )
         # Accumulate tool calls from stream deltas
         tc_accum: dict[int, dict[str, Any]] = {}  # index -> {id, name, arguments_parts}
-        async with self.client.stream("POST", url, headers=headers, json=body) as response:
-            response.raise_for_status()
-            deltas: list[str] = []
-            async for raw_line in response.aiter_lines():
-                line = raw_line.strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                data = line.partition(":")[2].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                choices = chunk.get("choices", [])
-                if not choices:
-                    continue
-                delta = choices[0].get("delta", {})
-                content = delta.get("content")
-                if isinstance(content, str):
-                    deltas.append(content)
-                    await effective_sink.push(content)
-                # Accumulate streamed tool calls
-                for tc_delta in delta.get("tool_calls", []):
-                    idx = tc_delta.get("index", 0)
-                    if idx not in tc_accum:
-                        tc_accum[idx] = {"id": "", "name": "", "arguments_parts": []}
-                    entry = tc_accum[idx]
-                    if "id" in tc_delta:
-                        entry["id"] = tc_delta["id"]
-                    fn = tc_delta.get("function", {})
-                    if "name" in fn:
-                        entry["name"] = fn["name"]
-                    if "arguments" in fn:
-                        entry["arguments_parts"].append(fn["arguments"])
-            full_text = "".join(deltas).strip() or None
-            tool_calls: list[ProviderToolCall] | None = None
-            if tc_accum:
-                calls = []
-                for idx in sorted(tc_accum):
-                    entry = tc_accum[idx]
-                    args_str = "".join(entry["arguments_parts"])
+        try:
+            async with self.client.stream("POST", url, headers=headers, json=body) as response:
+                response.raise_for_status()
+                deltas: list[str] = []
+                async for raw_line in response.aiter_lines():
+                    line = raw_line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line.partition(":")[2].strip()
+                    if data == "[DONE]":
+                        break
                     try:
-                        args = json.loads(args_str)
-                    except (json.JSONDecodeError, TypeError):
-                        args = {}
-                    calls.append(ProviderToolCall(id=entry["id"], name=entry["name"], arguments=args))
-                tool_calls = calls or None
-            return LLMResponse(text=full_text, tool_calls=tool_calls)
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content")
+                    if isinstance(content, str):
+                        deltas.append(content)
+                        await effective_sink.push(content)
+                    for tc_delta in delta.get("tool_calls", []):
+                        idx = tc_delta.get("index", 0)
+                        if idx not in tc_accum:
+                            tc_accum[idx] = {"id": "", "name": "", "arguments_parts": []}
+                        entry = tc_accum[idx]
+                        if "id" in tc_delta:
+                            entry["id"] = tc_delta["id"]
+                        fn = tc_delta.get("function", {})
+                        if "name" in fn:
+                            entry["name"] = fn["name"]
+                        if "arguments" in fn:
+                            entry["arguments_parts"].append(fn["arguments"])
+                full_text = "".join(deltas).strip() or None
+                tool_calls: list[ProviderToolCall] | None = None
+                if tc_accum:
+                    calls = []
+                    for idx in sorted(tc_accum):
+                        entry = tc_accum[idx]
+                        args_str = "".join(entry["arguments_parts"])
+                        try:
+                            args = json.loads(args_str)
+                        except (json.JSONDecodeError, TypeError):
+                            args = {}
+                        calls.append(ProviderToolCall(id=entry["id"], name=entry["name"], arguments=args))
+                    tool_calls = calls or None
+                result = LLMResponse(text=full_text, tool_calls=tool_calls)
+                _record_usage_event(
+                    self.store,
+                    run_id=run_id,
+                    session_key=session_key,
+                    provider=self.profile.provider,
+                    model=self.profile.model,
+                    input_chars=input_chars,
+                    output_chars=estimate_output_chars(result.text, result.tool_calls),
+                    started_at=started_at,
+                    duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                )
+                return result
+        except Exception as exc:
+            _record_usage_event(
+                self.store,
+                run_id=run_id,
+                session_key=session_key,
+                provider=self.profile.provider,
+                model=self.profile.model,
+                input_chars=input_chars,
+                output_chars=0,
+                started_at=started_at,
+                duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                status="error",
+                error=str(exc),
+            )
+            raise
 
 
 class OpenAICodexResponsesProvider:
-    def __init__(self, profile: AuthProfile, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(self, profile: AuthProfile, client: httpx.AsyncClient | None = None, *, store: Any | None = None) -> None:
         self.profile = profile
         self.client = client or httpx.AsyncClient(timeout=30.0)
+        self.store = store
 
     def _auth_headers(self) -> tuple[str, dict[str, str]]:
         token = str(
@@ -203,16 +324,50 @@ class OpenAICodexResponsesProvider:
         *,
         system_prompt: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
     ) -> LLMResponse:
         endpoint, headers = self._auth_headers()
-        async with self.client.stream(
-            "POST",
-            endpoint,
-            headers=headers,
-            json=self._build_payload(messages, system_prompt=system_prompt, tools=tools),
-        ) as response:
-            response.raise_for_status()
-            return await self._extract_stream_response(response)
+        started_at = utc_now().isoformat()
+        started_perf = time.perf_counter()
+        input_chars = estimate_input_chars(messages, system_prompt=system_prompt, tools=tools)
+        try:
+            async with self.client.stream(
+                "POST",
+                endpoint,
+                headers=headers,
+                json=self._build_payload(messages, system_prompt=system_prompt, tools=tools),
+            ) as response:
+                response.raise_for_status()
+                result = await self._extract_stream_response(response)
+            _record_usage_event(
+                self.store,
+                run_id=run_id,
+                session_key=session_key,
+                provider=self.profile.provider,
+                model=self.profile.model,
+                input_chars=input_chars,
+                output_chars=estimate_output_chars(result.text, result.tool_calls),
+                started_at=started_at,
+                duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                usage=result.usage,
+            )
+            return result
+        except Exception as exc:
+            _record_usage_event(
+                self.store,
+                run_id=run_id,
+                session_key=session_key,
+                provider=self.profile.provider,
+                model=self.profile.model,
+                input_chars=input_chars,
+                output_chars=0,
+                started_at=started_at,
+                duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                status="error",
+                error=str(exc),
+            )
+            raise
 
     async def generate_stream(
         self,
@@ -221,18 +376,52 @@ class OpenAICodexResponsesProvider:
         system_prompt: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         sink: StreamSink | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
     ) -> LLMResponse:
         """Generate with streaming. Push deltas to sink. Return LLMResponse."""
         effective_sink = sink or NullSink()
         endpoint, headers = self._auth_headers()
-        async with self.client.stream(
-            "POST",
-            endpoint,
-            headers=headers,
-            json=self._build_payload(messages, system_prompt=system_prompt, tools=tools),
-        ) as response:
-            response.raise_for_status()
-            return await self._extract_stream_response(response, sink=effective_sink)
+        started_at = utc_now().isoformat()
+        started_perf = time.perf_counter()
+        input_chars = estimate_input_chars(messages, system_prompt=system_prompt, tools=tools)
+        try:
+            async with self.client.stream(
+                "POST",
+                endpoint,
+                headers=headers,
+                json=self._build_payload(messages, system_prompt=system_prompt, tools=tools),
+            ) as response:
+                response.raise_for_status()
+                result = await self._extract_stream_response(response, sink=effective_sink)
+            _record_usage_event(
+                self.store,
+                run_id=run_id,
+                session_key=session_key,
+                provider=self.profile.provider,
+                model=self.profile.model,
+                input_chars=input_chars,
+                output_chars=estimate_output_chars(result.text, result.tool_calls),
+                started_at=started_at,
+                duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                usage=result.usage,
+            )
+            return result
+        except Exception as exc:
+            _record_usage_event(
+                self.store,
+                run_id=run_id,
+                session_key=session_key,
+                provider=self.profile.provider,
+                model=self.profile.model,
+                input_chars=input_chars,
+                output_chars=0,
+                started_at=started_at,
+                duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                status="error",
+                error=str(exc),
+            )
+            raise
 
     def _build_payload(
         self,
@@ -476,13 +665,25 @@ class CodexCliProvider:
         client: httpx.AsyncClient | None = None,
         *,
         workdir: str = ".",
+        store: Any | None = None,
     ) -> None:
         self.profile = profile
         self.client = client or httpx.AsyncClient(timeout=20.0)
         self.workdir = workdir
+        self.store = store
 
-    async def generate(self, messages: list[dict[str, Any]], *, system_prompt: str | None = None) -> str:
+    async def generate(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
+    ) -> str:
         prompt = self._build_prompt(messages, system_prompt=system_prompt)
+        started_at = utc_now().isoformat()
+        started_perf = time.perf_counter()
+        input_chars = len(prompt)
         with tempfile.NamedTemporaryFile(mode="r+", encoding="utf-8", suffix=".txt") as output_file:
             command = [
                 "codex",
@@ -496,20 +697,49 @@ class CodexCliProvider:
                 output_file.name,
                 prompt,
             ]
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
-            if process.returncode != 0:
-                detail = stderr.decode().strip() or stdout.decode().strip() or f"exit code {process.returncode}"
-                raise RuntimeError(f"codex exec failed: {detail}")
-            output_file.seek(0)
-            result = output_file.read().strip()
-            if not result:
-                raise RuntimeError("codex exec returned an empty response")
-            return result
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+                if process.returncode != 0:
+                    detail = stderr.decode().strip() or stdout.decode().strip() or f"exit code {process.returncode}"
+                    raise RuntimeError(f"codex exec failed: {detail}")
+                output_file.seek(0)
+                result = output_file.read().strip()
+                if not result:
+                    raise RuntimeError("codex exec returned an empty response")
+                _record_usage_event(
+                    self.store,
+                    run_id=run_id,
+                    session_key=session_key,
+                    provider=self.profile.provider,
+                    model=self.profile.model,
+                    input_chars=input_chars,
+                    output_chars=len(result),
+                    started_at=started_at,
+                    duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                    usage=None,
+                )
+                return result
+            except Exception as exc:
+                _record_usage_event(
+                    self.store,
+                    run_id=run_id,
+                    session_key=session_key,
+                    provider=self.profile.provider,
+                    model=self.profile.model,
+                    input_chars=input_chars,
+                    output_chars=0,
+                    started_at=started_at,
+                    duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                    usage=None,
+                    status="error",
+                    error=str(exc),
+                )
+                raise
 
     def _build_prompt(self, messages: list[dict[str, Any]], *, system_prompt: str | None) -> str:
         parts = ["Reply as a concise assistant."]
@@ -517,7 +747,12 @@ class CodexCliProvider:
             parts.extend(["", "System instructions:", system_prompt.strip()])
         parts.extend(["", "Conversation:"])
         for message in messages:
-            parts.append(f"{message['role']}: {message['content']}")
+            role = message.get("role", "user")
+            content = message.get("content")
+            if content is None:
+                # Some internal callers may pass non-chat payloads; stringify safely.
+                content = str(message)
+            parts.append(f"{role}: {content}")
             attachments = message.get("attachments")
             if isinstance(attachments, list) and attachments:
                 parts.extend(["attachments:", attachment_prompt_context([item for item in attachments if isinstance(item, dict)])])
@@ -526,27 +761,42 @@ class CodexCliProvider:
 
 
 class ModelRouter:
-    def __init__(self, auth_store: AuthStore, client: httpx.AsyncClient | None = None, *, workdir: str = ".") -> None:
+    def __init__(
+        self,
+        auth_store: AuthStore,
+        client: httpx.AsyncClient | None = None,
+        *,
+        workdir: str = ".",
+        store: Any | None = None,
+    ) -> None:
         self.auth_store = auth_store
         self.client = client or httpx.AsyncClient(timeout=20.0)
         self.workdir = workdir
+        self.store = store
 
     def resolve_profile(self) -> AuthProfile | None:
         return self.auth_store.resolve()
 
-    async def generate(self, messages: list[dict[str, Any]], *, system_prompt: str | None = None) -> str | None:
+    async def generate(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
+    ) -> str | None:
         """Backward-compat: returns text only (str | None). Old callers use this."""
         profile = self.resolve_profile()
         if profile is None:
             return None
         provider = self._provider_for(profile)
         try:
-            resp = await provider.generate(messages, system_prompt=system_prompt)
+            resp = await provider.generate(messages, system_prompt=system_prompt, run_id=run_id, session_key=session_key)
         except Exception:
             fallback = self._fallback_provider_for(profile)
             if fallback is None:
                 raise
-            resp = await fallback.generate(messages, system_prompt=system_prompt)
+            resp = await fallback.generate(messages, system_prompt=system_prompt, run_id=run_id, session_key=session_key)
         if isinstance(resp, str):
             return resp
         return resp.text if resp else None
@@ -557,6 +807,8 @@ class ModelRouter:
         *,
         system_prompt: str | None = None,
         sink: StreamSink | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
     ) -> str | None:
         """Backward-compat streaming: returns text only (str | None)."""
         profile = self.resolve_profile()
@@ -567,13 +819,13 @@ class ModelRouter:
         if hasattr(provider, "generate_stream"):
             try:
                 resp = await provider.generate_stream(
-                    messages, system_prompt=system_prompt, sink=effective_sink,
+                    messages, system_prompt=system_prompt, sink=effective_sink, run_id=run_id, session_key=session_key,
                 )
             except Exception:
                 fallback = self._fallback_provider_for(profile)
                 if fallback is None:
                     raise
-                text = await fallback.generate(messages, system_prompt=system_prompt)
+                text = await fallback.generate(messages, system_prompt=system_prompt, run_id=run_id, session_key=session_key)
                 if isinstance(text, LLMResponse):
                     text = text.text
                 if text:
@@ -582,7 +834,7 @@ class ModelRouter:
             if isinstance(resp, str):
                 return resp
             return resp.text if resp else None
-        resp = await provider.generate(messages, system_prompt=system_prompt)
+        resp = await provider.generate(messages, system_prompt=system_prompt, run_id=run_id, session_key=session_key)
         text = resp if isinstance(resp, str) else (resp.text if resp else None)
         if text and effective_sink is not None:
             await effective_sink.push(text)
@@ -595,6 +847,8 @@ class ModelRouter:
         system_prompt: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         sink: StreamSink | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
     ) -> LLMResponse | None:
         """Full-featured method for react loop — returns LLMResponse with tool_calls."""
         profile = self.resolve_profile()
@@ -606,7 +860,12 @@ class ModelRouter:
         if sink is not None and hasattr(provider, "generate_stream"):
             try:
                 return await provider.generate_stream(
-                    messages, system_prompt=system_prompt, tools=tools, sink=effective_sink,
+                    messages,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    sink=effective_sink,
+                    run_id=run_id,
+                    session_key=session_key,
                 )
             except Exception:
                 fallback = self._fallback_provider_for(profile)
@@ -614,9 +873,20 @@ class ModelRouter:
                     raise
                 # Fallback without streaming but still attempt tools
                 try:
-                    resp = await provider.generate(messages, system_prompt=system_prompt, tools=tools)
+                    resp = await provider.generate(
+                        messages,
+                        system_prompt=system_prompt,
+                        tools=tools,
+                        run_id=run_id,
+                        session_key=session_key,
+                    )
                 except Exception:
-                    text = await fallback.generate(messages, system_prompt=system_prompt)
+                    text = await fallback.generate(
+                        messages,
+                        system_prompt=system_prompt,
+                        run_id=run_id,
+                        session_key=session_key,
+                    )
                     resp = LLMResponse(text=text) if isinstance(text, str) else text
                 if isinstance(resp, str):
                     resp = LLMResponse(text=resp)
@@ -625,15 +895,21 @@ class ModelRouter:
                 return resp
 
         try:
-            resp = await provider.generate(messages, system_prompt=system_prompt, tools=tools)
+            resp = await provider.generate(
+                messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                run_id=run_id,
+                session_key=session_key,
+            )
         except TypeError:
             # Provider doesn't accept tools kwarg (e.g. CodexCliProvider)
-            resp = await provider.generate(messages, system_prompt=system_prompt)
+            resp = await provider.generate(messages, system_prompt=system_prompt, run_id=run_id, session_key=session_key)
         except Exception:
             fallback = self._fallback_provider_for(profile)
             if fallback is None:
                 raise
-            text = await fallback.generate(messages, system_prompt=system_prompt)
+            text = await fallback.generate(messages, system_prompt=system_prompt, run_id=run_id, session_key=session_key)
             return LLMResponse(text=text) if isinstance(text, str) else text
 
         # Normalize: old providers may return str, new ones return LLMResponse
@@ -643,13 +919,13 @@ class ModelRouter:
 
     def _provider_for(self, profile: AuthProfile) -> Any:
         if profile.provider == "azure-openai":
-            return AzureOpenAIProvider(profile, client=self.client)
+            return AzureOpenAIProvider(profile, client=self.client, store=self.store)
         if profile.provider == "codex-cli":
-            return CodexCliProvider(profile, client=self.client, workdir=self.workdir)
+            return CodexCliProvider(profile, client=self.client, workdir=self.workdir, store=self.store)
         if profile.provider == "openai-codex":
             if str(profile.settings.get("transport", "responses")).strip().lower() == "cli":
-                return CodexCliProvider(profile, client=self.client, workdir=self.workdir)
-            return OpenAICodexResponsesProvider(profile, client=self.client)
+                return CodexCliProvider(profile, client=self.client, workdir=self.workdir, store=self.store)
+            return OpenAICodexResponsesProvider(profile, client=self.client, store=self.store)
         raise ValueError(f"unsupported provider: {profile.provider}")
 
     def _fallback_provider_for(self, profile: AuthProfile) -> Any | None:
@@ -659,4 +935,4 @@ class ModelRouter:
             return None
         if str(profile.settings.get("transport", "responses")).strip().lower() == "cli":
             return None
-        return CodexCliProvider(profile, client=self.client, workdir=self.workdir)
+        return CodexCliProvider(profile, client=self.client, workdir=self.workdir, store=self.store)

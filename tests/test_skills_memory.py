@@ -20,6 +20,42 @@ def test_skill_registry_loads_skill_manifest_and_markdown(tmp_path) -> None:
     assert "ops skill" in registry.context_bundle()
     assert "Keep responses terse." not in registry.context_bundle()
     assert "Keep responses terse." in registry.read(["ops"])
+    assert registry.get("ops").metadata == {}
+
+
+def test_skill_registry_parses_openclaw_frontmatter(tmp_path) -> None:
+    skill_dir = tmp_path / "skills" / "calendar"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "manifest.json").write_text(
+        json.dumps({"id": "calendar", "name": "Calendar", "description": "calendar skill"}),
+        encoding="utf-8",
+    )
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: gws-calendar\n"
+        "description: Google Calendar\n"
+        "metadata:\n"
+        "  openclaw:\n"
+        "    category: productivity\n"
+        "    requires:\n"
+        "      bins:\n"
+        "        - gws\n"
+        "    cliHelp: gws calendar --help\n"
+        "---\n\n"
+        "# Calendar\n\n"
+        "Manage events.\n",
+        encoding="utf-8",
+    )
+
+    registry = SkillRegistry(tmp_path / "skills")
+    registry.load()
+
+    skill = registry.get("calendar")
+    assert skill is not None
+    assert skill.metadata["metadata"]["openclaw"]["category"] == "productivity"
+    assert skill.metadata["metadata"]["openclaw"]["requires"]["bins"] == ["gws"]
+    assert skill.metadata["metadata"]["openclaw"]["cliHelp"] == "gws calendar --help"
+    assert skill.instruction_markdown == "# Calendar\n\nManage events."
 
 
 def test_memory_store_structures_and_deduplicates_user_memory(tmp_path) -> None:

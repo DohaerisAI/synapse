@@ -76,51 +76,54 @@ def run_repl(runtime: Runtime) -> None:
     user_id = "local"
     msg_counter = 0
 
-    while True:
-        try:
-            text = input(f"{_CYAN}❯{_RESET} ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nBye.")
-            break
+    try:
+        while True:
+            try:
+                text = input(f"{_CYAN}❯{_RESET} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nBye.")
+                break
 
-        if not text:
-            continue
-        if text in {"/quit", "/exit", "/q"}:
-            print("Bye.")
-            break
-        if text == "/mcp":
-            _show_mcp(runtime)
-            continue
-        if text.startswith("/events"):
-            _show_events(runtime, text)
-            continue
+            if not text:
+                continue
+            if text in {"/quit", "/exit", "/q"}:
+                print("Bye.")
+                break
+            if text == "/mcp":
+                _show_mcp(runtime)
+                continue
+            if text.startswith("/events"):
+                _show_events(runtime, text)
+                continue
 
-        msg_counter += 1
-        event = NormalizedInboundEvent(
-            adapter=adapter,
-            channel_id=channel_id,
-            user_id=user_id,
-            message_id=f"repl-{msg_counter}",
-            text=text,
-            occurred_at=datetime.now(timezone.utc),
-        )
+            msg_counter += 1
+            event = NormalizedInboundEvent(
+                adapter=adapter,
+                channel_id=channel_id,
+                user_id=user_id,
+                message_id=f"repl-{msg_counter}",
+                text=text,
+                occurred_at=datetime.now(timezone.utc),
+            )
 
-        stream = TerminalStreamSink()
-        t0 = time.monotonic()
-        try:
-            result = asyncio.run(runtime.gateway.ingest(event, stream_sink=stream))
-            elapsed = time.monotonic() - t0
-            if not stream.streamed:
-                reply = (result.reply_text or "").strip()
-                if reply:
-                    print(f"\n{reply}\n")
-                else:
-                    print(f"\n{_DIM}[{result.status}]{_RESET}\n")
-            _print_trace(runtime, result, elapsed)
-        except Exception as e:
-            elapsed = time.monotonic() - t0
-            print(f"\n{_RED}Error: {e}{_RESET}\n")
-            print(f"  {_DIM}{elapsed:.1f}s{_RESET}\n")
+            stream = TerminalStreamSink()
+            t0 = time.monotonic()
+            try:
+                result = asyncio.run(runtime.gateway.ingest(event, stream_sink=stream))
+                elapsed = time.monotonic() - t0
+                if not stream.streamed:
+                    reply = (result.reply_text or "").strip()
+                    if reply:
+                        print(f"\n{reply}\n")
+                    else:
+                        print(f"\n{_DIM}[{result.status}]{_RESET}\n")
+                _print_trace(runtime, result, elapsed)
+            except Exception as e:
+                elapsed = time.monotonic() - t0
+                print(f"\n{_RED}Error: {e}{_RESET}\n")
+                print(f"  {_DIM}{elapsed:.1f}s{_RESET}\n")
+    finally:
+        runtime.shutdown()
 
 
 def _print_trace(runtime: Runtime, result: GatewayResult, elapsed: float) -> None:

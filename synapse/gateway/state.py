@@ -37,6 +37,8 @@ class StateManager:
         """Build a simple reply from execution results (inline, no LLM renderer)."""
         if not execution_results:
             return "Done."
+        if len(execution_results) == 1 and execution_results[0].get("action") == "usage.summary":
+            return str(execution_results[0].get("detail", "")).strip() or "No usage data."
         parts: list[str] = []
         for result in execution_results:
             action = result.get("action", "unknown")

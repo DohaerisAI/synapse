@@ -152,6 +152,43 @@ class TestReactLoop:
         assert result.tool_calls_made[0]["denied"] is True
 
     @pytest.mark.asyncio
+    async def test_tool_needs_approval_without_manager_does_not_execute(self):
+        from synapse.react_loop import run_react_loop
+
+        executed = False
+
+        async def _exec(params, *, ctx):
+            nonlocal executed
+            executed = True
+            return ToolResult(output="sent")
+
+        tool = ToolDef(
+            name="gmail_send",
+            description="send mail",
+            input_schema={"type": "object"},
+            execute=_exec,
+            needs_approval=True,
+        )
+        model_router = MagicMock()
+        model_router.chat = AsyncMock(
+            side_effect=[
+                _tool_response([{"name": "gmail_send", "arguments": {"to": "a@b.com"}}]),
+                _text_response("Approval is required before I can send that."),
+            ]
+        )
+
+        result = await run_react_loop(
+            messages=[{"role": "user", "content": "send email"}],
+            system_prompt="test",
+            tools=[tool],
+            model_router=model_router,
+        )
+
+        assert result.reply == "Approval is required before I can send that."
+        assert executed is False
+        assert result.tool_calls_made[0]["denied"] is True
+
+    @pytest.mark.asyncio
     async def test_tool_needs_approval_approved(self):
         from synapse.react_loop import run_react_loop
 
@@ -312,3 +349,104 @@ class TestReactLoop:
         assert result.turns == 2
         assert len(result.tool_calls_made) == 1
         assert "not found" in result.tool_calls_made[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_live_analyze_request_auto_calls_swing_analyze_before_reply(self):
+        from synapse.react_loop import run_react_loop
+
+        executed: list[dict] = []
+
+        async def _swing_exec(params, *, ctx):
+            executed.append(dict(params))
+            return ToolResult(output='{"symbol":"LAURUSLABS","rsi":61.5}')
+
+        swing_tool = ToolDef(
+            name="swing_analyze",
+            description="live analysis",
+            input_schema={"type": "object"},
+            execute=_swing_exec,
+        )
+        model_router = MagicMock()
+        model_router.chat = AsyncMock(return_value=_text_response("Laurus Labs RSI is 61.5 right now."))
+
+        result = await run_react_loop(
+            messages=[{"role": "user", "content": "live laurus labs analyse"}],
+            system_prompt="test",
+            tools=[swing_tool],
+            model_router=model_router,
+        )
+
+        assert result.reply == "Laurus Labs RSI is 61.5 right now."
+        assert executed == [{"symbol": "LAURUSLABS", "timeframe": "daily"}]
+        assert any(tc["tool"] == "swing_analyze" for tc in result.tool_calls_made)
+
+    @pytest.mark.asyncio
+    async def test_kite_tool_call_blocked_without_explicit_user_request(self):
+        from synapse.react_loop import run_react_loop
+
+        executed = False
+
+        async def _exec(params, *, ctx):
+            nonlocal executed
+            executed = True
+            return ToolResult(output="holdings")
+
+        kite_tool = ToolDef(
+            name="kite.get_holdings",
+            description="kite holdings",
+            input_schema={"type": "object"},
+            execute=_exec,
+        )
+        model_router = MagicMock()
+        model_router.chat = AsyncMock(
+            side_effect=[
+                _tool_response([{"name": "kite.get_holdings", "arguments": {}}]),
+                _text_response("Blocked."),
+            ]
+        )
+
+        result = await run_react_loop(
+            messages=[{"role": "user", "content": "show my portfolio"}],
+            system_prompt="test",
+            tools=[kite_tool],
+            model_router=model_router,
+        )
+
+        assert result.reply == "Blocked."
+        assert executed is False
+        assert result.tool_calls_made[0]["denied"] is True
+
+    @pytest.mark.asyncio
+    async def test_kite_tool_call_allowed_when_user_explicitly_requests_kite(self):
+        from synapse.react_loop import run_react_loop
+
+        executed = False
+
+        async def _exec(params, *, ctx):
+            nonlocal executed
+            executed = True
+            return ToolResult(output="holdings")
+
+        kite_tool = ToolDef(
+            name="kite.get_holdings",
+            description="kite holdings",
+            input_schema={"type": "object"},
+            execute=_exec,
+        )
+        model_router = MagicMock()
+        model_router.chat = AsyncMock(
+            side_effect=[
+                _tool_response([{"name": "kite.get_holdings", "arguments": {}}]),
+                _text_response("Here are your Kite holdings."),
+            ]
+        )
+
+        result = await run_react_loop(
+            messages=[{"role": "user", "content": "check my Kite holdings"}],
+            system_prompt="test",
+            tools=[kite_tool],
+            model_router=model_router,
+        )
+
+        assert result.reply == "Here are your Kite holdings."
+        assert executed is True

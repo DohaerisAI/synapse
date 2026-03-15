@@ -12,8 +12,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-from .models import GatewayResult, NormalizedInboundEvent
+from .models import ApprovalStatus, DeliveryTarget, GatewayResult, NormalizedInboundEvent
 from .runtime import Runtime, build_runtime
+from .usage import format_cost
 
 
 class InboundEventRequest(BaseModel):
@@ -25,6 +26,25 @@ class InboundEventRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class SkillInstallRequest(BaseModel):
+    source: str
+
+
+class JobDeliveryTargetRequest(BaseModel):
+    adapter: str
+    channel_id: str
+    user_id: str
+
+
+class CreateJobRequest(BaseModel):
+    tool_name: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    parent_run_id: str | None = None
+    session_key: str | None = None
+    delivery_target: JobDeliveryTargetRequest | None = None
+    approval_id: str | None = None
+
+
 def create_app(runtime: Runtime | None = None, *, root: Path | None = None) -> FastAPI:
     runtime_instance = runtime or build_runtime(root=root)
 
@@ -34,7 +54,7 @@ def create_app(runtime: Runtime | None = None, *, root: Path | None = None) -> F
         try:
             yield
         finally:
-            runtime_instance.stop_background_services()
+            runtime_instance.shutdown()
 
     app = FastAPI(title="Agent Runtime MVP", lifespan=lifespan)
     app.state.runtime = runtime_instance
@@ -113,6 +133,17 @@ def create_app(runtime: Runtime | None = None, *, root: Path | None = None) -> F
     async def list_skills() -> list[dict[str, Any]]:
         return [serialize(item) for item in runtime_instance.skills.skills.values()]
 
+    @app.post("/api/skills/reload")
+    async def reload_skills() -> dict[str, Any]:
+        return runtime_instance.reload_skills()
+
+    @app.post("/api/skills/install")
+    async def install_skill(payload: SkillInstallRequest) -> dict[str, Any]:
+        try:
+            return runtime_instance.install_skill(payload.source)
+        except (FileNotFoundError, NotADirectoryError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     @app.get("/api/integrations")
     async def list_integrations() -> list[dict[str, Any]]:
         return [serialize(item) for item in runtime_instance.integrations.list_integrations()]
@@ -129,6 +160,33 @@ def create_app(runtime: Runtime | None = None, *, root: Path | None = None) -> F
         snapshot = runtime_instance.heartbeat_snapshot()
         snapshot["history"] = [serialize(item) for item in runtime_instance.store.list_heartbeats()]
         return snapshot
+
+    @app.get("/api/usage/summary")
+    async def usage_summary(window_hours: int = 24) -> dict[str, Any]:
+        return runtime_instance.store.summarize_usage(
+            window_hours=window_hours,
+            pricing=runtime_instance.config.pricing,
+        )
+
+    @app.get("/api/usage/runs")
+    async def usage_runs(window_hours: int = 24) -> dict[str, Any]:
+        return {
+            "window_hours": window_hours,
+            "runs": runtime_instance.store.usage_by_run(
+                window_hours=window_hours,
+                pricing=runtime_instance.config.pricing,
+            ),
+        }
+
+    @app.get("/api/usage/models")
+    async def usage_models(window_hours: int = 24) -> dict[str, Any]:
+        return {
+            "window_hours": window_hours,
+            "models": runtime_instance.store.usage_by_model(
+                window_hours=window_hours,
+                pricing=runtime_instance.config.pricing,
+            ),
+        }
 
     @app.post("/api/runs/inbound")
     async def ingest_inbound(payload: InboundEventRequest) -> dict[str, Any]:
@@ -172,6 +230,78 @@ def create_app(runtime: Runtime | None = None, *, root: Path | None = None) -> F
             raise HTTPException(status_code=409, detail=str(error)) from error
         runtime_instance.deliver_result(result)
         return serialize(result)
+
+    @app.post("/api/jobs")
+    async def create_job(payload: CreateJobRequest) -> dict[str, Any]:
+        if runtime_instance.job_service is None or runtime_instance.gateway.tool_registry is None:
+            raise HTTPException(status_code=503, detail="job service is not configured")
+        if payload.tool_name not in {"codex_propose", "codex_run_tests", "shell_exec"}:
+            raise HTTPException(status_code=400, detail=f"tool does not support background jobs: {payload.tool_name}")
+        tool = runtime_instance.gateway.tool_registry.get(payload.tool_name)
+        if tool is None:
+            raise HTTPException(status_code=404, detail=f"unknown tool: {payload.tool_name}")
+
+        params = dict(payload.params)
+        params.pop("background", None)
+        if tool.check_approval(params):
+            if not payload.approval_id:
+                raise HTTPException(status_code=409, detail="approval required before creating this job")
+            approval = runtime_instance.store.get_approval(payload.approval_id)
+            approval_params = None if approval is None else approval.payload.get("params")
+            if (
+                approval is None
+                or approval.status != ApprovalStatus.APPROVED
+                or approval.action_name != payload.tool_name
+                or approval_params != params
+            ):
+                raise HTTPException(status_code=409, detail="approval has not been granted for this tool call")
+
+        parent_run = None
+        if payload.parent_run_id is not None:
+            parent_run = runtime_instance.store.get_run(payload.parent_run_id)
+            if parent_run is None:
+                raise HTTPException(status_code=404, detail=f"unknown run id: {payload.parent_run_id}")
+
+        delivery_target = None
+        if payload.delivery_target is not None:
+            delivery_target = DeliveryTarget(
+                adapter=payload.delivery_target.adapter,
+                channel_id=payload.delivery_target.channel_id,
+                user_id=payload.delivery_target.user_id,
+            )
+        elif parent_run is not None:
+            delivery_target = DeliveryTarget(
+                adapter=parent_run.adapter,
+                channel_id=parent_run.channel_id,
+                user_id=parent_run.user_id,
+            )
+
+        session_key = payload.session_key or (None if parent_run is None else parent_run.session_key)
+        job = runtime_instance.job_service.enqueue_job(
+            tool_name=payload.tool_name,
+            params=params,
+            parent_run_id=payload.parent_run_id,
+            session_key=session_key,
+            delivery_target=delivery_target,
+            approval_id=payload.approval_id,
+        )
+        return serialize(job)
+
+    @app.get("/api/jobs/{job_id}")
+    async def get_job(job_id: str) -> dict[str, Any]:
+        job = runtime_instance.store.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"unknown job id: {job_id}")
+        return serialize(job)
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    async def cancel_job(job_id: str) -> dict[str, Any]:
+        if runtime_instance.job_service is None:
+            raise HTTPException(status_code=503, detail="job service is not configured")
+        job = runtime_instance.job_service.request_cancel(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"unknown job id: {job_id}")
+        return serialize(job)
 
     @app.get("/console", response_class=HTMLResponse)
     async def console_overview() -> str:
@@ -346,6 +476,33 @@ def create_app(runtime: Runtime | None = None, *, root: Path | None = None) -> F
             ]
         )
         return page_html("Logs", body)
+
+    @app.get("/console/usage", response_class=HTMLResponse)
+    async def console_usage() -> str:
+        summary = runtime_instance.store.summarize_usage(window_hours=24, pricing=runtime_instance.config.pricing)
+        runs = runtime_instance.store.usage_by_run(window_hours=24, pricing=runtime_instance.config.pricing)
+        models = runtime_instance.store.usage_by_model(window_hours=24, pricing=runtime_instance.config.pricing)
+        totals = summary["totals"]
+        body = "\n".join(
+            [
+                nav_html(),
+                metric_grid(
+                    [
+                        ("Model calls", str(totals["usage_event_count"])),
+                        ("Tool calls", str(totals["tool_event_count"])),
+                        ("Tokens", str(totals["total_tokens"])),
+                        ("Cost", format_cost(float(totals["cost"]), unknown=bool(totals["cost_unknown"]))),
+                    ]
+                ),
+                section_html("Usage Totals", definition_list(summary["totals"])),
+                section_html("Top Tools", table_html(summary["top_tools"])),
+                section_html("Top Skills", table_html(summary["top_skills"])),
+                section_html("Job Counts", definition_list(summary["job_counts"])),
+                section_html("Models", table_html(models)),
+                section_html("Runs", table_html(runs)),
+            ]
+        )
+        return page_html("Usage", body)
 
     @app.get("/console/self", response_class=HTMLResponse)
     async def console_self() -> str:
@@ -526,6 +683,7 @@ def nav_html() -> str:
 <a href="/console/integrations">Integrations</a>
 <a href="/console/adapters">Adapter Health</a>
 <a href="/console/heartbeat">Heartbeat</a>
+<a href="/console/usage">Usage</a>
 <a href="/console/logs">Logs</a>
 <a href="/console/self">Self</a>
 <a href="/console/diagnosis">Diagnosis</a>

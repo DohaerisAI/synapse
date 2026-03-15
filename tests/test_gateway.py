@@ -8,12 +8,12 @@ from synapse.gws import GWSBridge
 from synapse.integrations import IntegrationRegistry
 from synapse.memory import MemoryStore
 from synapse.models import NormalizedInboundEvent
-from synapse.providers import LLMResponse, ModelRouter
+from synapse.providers import LLMResponse, ModelRouter, ProviderToolCall
 from synapse.session import SessionStateMachine
 from synapse.skills import SkillRegistry
 from synapse.store import SQLiteStore
 from synapse.tools.builtins import register_builtin_tools
-from synapse.tools.registry import ToolRegistry
+from synapse.tools.registry import ToolDef, ToolRegistry, ToolResult
 from synapse.workspace import WorkspaceStore
 
 
@@ -28,12 +28,12 @@ class FakeModelRouter(ModelRouter):
     def resolve_profile(self):  # type: ignore[override]
         return self._profile
 
-    async def generate(self, messages, *, system_prompt=None):  # type: ignore[override]
+    async def generate(self, messages, *, system_prompt=None, run_id=None, session_key=None):  # type: ignore[override]
         self.last_system_prompt = system_prompt
         self.system_prompts.append(system_prompt)
         return None
 
-    async def chat(self, messages, *, system_prompt=None, tools=None, sink=None):  # type: ignore[override]
+    async def chat(self, messages, *, system_prompt=None, tools=None, sink=None, run_id=None, session_key=None):  # type: ignore[override]
         import asyncio
 
         self.last_system_prompt = system_prompt
@@ -216,6 +216,39 @@ async def test_gateway_gws_status_runs_without_approval(tmp_path) -> None:
     assert "gws.auth.status" in result.reply_text
 
 
+async def test_gateway_usage_command_returns_compact_summary(tmp_path) -> None:
+    gateway = build_gateway(tmp_path)
+    gateway.store.append_usage_event(
+        run_id="seed-run",
+        session_key="seed-session",
+        provider="azure-openai",
+        model="gpt-4",
+        prompt_tokens=10,
+        completion_tokens=5,
+        total_tokens=15,
+        input_chars=100,
+        output_chars=40,
+        started_at="2026-03-15T00:00:00+00:00",
+        finished_at="2026-03-15T00:00:01+00:00",
+        duration_ms=1000,
+        status="ok",
+    )
+
+    result = await gateway.ingest(
+        NormalizedInboundEvent(
+            adapter="telegram",
+            channel_id="chat-1",
+            user_id="user-1",
+            message_id="message-usage",
+            text="/usage",
+        )
+    )
+
+    assert result.status == "COMPLETED"
+    assert "**Window:** 24h" in result.reply_text
+    assert "**Tokens:**" in result.reply_text
+
+
 async def test_gateway_gws_gmail_send_executes(tmp_path) -> None:
     gateway = build_gateway(tmp_path)
 
@@ -310,6 +343,48 @@ async def test_gateway_loads_user_memory_into_system_prompt(tmp_path) -> None:
     assert "User prefers to be called AD." in gateway.model_router.last_system_prompt
 
 
+def test_gateway_system_prompt_includes_openclaw_persona_rules(tmp_path) -> None:
+    gateway = build_gateway(tmp_path, agent_name="Nora")
+    event = NormalizedInboundEvent(
+        adapter="telegram",
+        channel_id="chat-1",
+        user_id="user-1",
+        message_id="message-1",
+        text="check this",
+    )
+
+    prompt = gateway.context_builder.system_prompt("telegram__chat-1__user-1", "user-1", event)
+
+    assert "No fluff, no performative hedging" in prompt
+    assert "inspect or fetch them with tools instead of guessing" in prompt
+    assert "Bro-level casual is fine" in prompt
+    assert "Never claim you checked, verified, searched, read, diffed, ran, or confirmed anything unless a tool call in this turn actually did it." in prompt
+
+
+async def test_gateway_react_prompt_includes_repo_git_inspection_rules(tmp_path) -> None:
+    gateway = build_gateway(tmp_path)
+
+    await gateway.ingest(
+        NormalizedInboundEvent(
+            adapter="telegram",
+            channel_id="chat-1",
+            user_id="user-1",
+            message_id="message-1",
+            text="what changed in this repo?",
+        )
+    )
+
+    assert gateway.model_router.last_system_prompt is not None
+    assert "No fluff, no performative hedging" in gateway.model_router.last_system_prompt
+    assert "Bro-level casual is fine" in gateway.model_router.last_system_prompt
+    assert "git status -sb" in gateway.model_router.last_system_prompt
+    assert "git diff --stat" in gateway.model_router.last_system_prompt
+    assert "Prefer `repo_open`/`repo_grep`/`repo_diff`/`repo_diffstat` for repo inspection" in gateway.model_router.last_system_prompt
+    assert "Prefer `fs_read`/`fs_write`/`fs_edit` for file reads and direct file edits" in gateway.model_router.last_system_prompt
+    assert "Prefer `patch_apply` over ad hoc shell patching" in gateway.model_router.last_system_prompt
+    assert "shell_exec is not an interactive shell" in gateway.model_router.last_system_prompt
+
+
 async def test_gateway_react_loop_returns_model_reply(tmp_path) -> None:
     """Non-slash messages go through the react loop and return the model reply."""
 
@@ -330,6 +405,62 @@ async def test_gateway_react_loop_returns_model_reply(tmp_path) -> None:
 
     assert result.status == "COMPLETED"
     assert result.reply_text == "Hello from the react loop!"
+
+
+async def test_gateway_react_risky_tool_waits_for_explicit_approval(tmp_path) -> None:
+    responses = iter(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ProviderToolCall(
+                        id="tool-1",
+                        name="risky_write",
+                        arguments={"target": "prod"},
+                    )
+                ]
+            ),
+            LLMResponse(text="Write completed after approval."),
+        ]
+    )
+    executions: list[dict] = []
+
+    async def _exec(params, *, ctx):
+        executions.append(params)
+        return ToolResult(output="write ok")
+
+    gateway = build_gateway(tmp_path, chat_runner=lambda messages, **_: next(responses))
+    gateway.tool_registry.register(
+        ToolDef(
+            name="risky_write",
+            description="Perform a risky write.",
+            input_schema={"type": "object"},
+            execute=_exec,
+            needs_approval=True,
+        )
+    )
+
+    initial = await gateway.ingest(
+        NormalizedInboundEvent(
+            adapter="telegram",
+            channel_id="chat-1",
+            user_id="user-1",
+            message_id="message-1",
+            text="do the risky write",
+        )
+    )
+
+    assert initial.status == "WAITING_APPROVAL"
+    assert executions == []
+    pending = gateway.store.list_pending_approvals()
+    assert len(pending) == 1
+    assert pending[0].run_id == initial.run_id
+    assert pending[0].payload["kind"] == "react_tool_call"
+
+    approved = await gateway.approve(pending[0].approval_id)
+
+    assert approved.status == "COMPLETED"
+    assert approved.reply_text == "Write completed after approval."
+    assert executions == [{"target": "prod"}]
 
 
 async def test_gateway_includes_attachment_summary_in_model_messages(tmp_path) -> None:
@@ -415,3 +546,157 @@ async def test_gateway_queues_follow_up_while_run_is_active(tmp_path) -> None:
     gate.set()
     first_result = await task
     assert first_result.status == "COMPLETED"
+
+
+async def test_gateway_operator_show_changes_runs_repo_inspection_first(tmp_path) -> None:
+    gateway = build_gateway(tmp_path, chat_runner=lambda messages, **_: LLMResponse(text="Here is the summary."))
+
+    result = await gateway.ingest(
+        NormalizedInboundEvent(
+            adapter="telegram",
+            channel_id="chat-1",
+            user_id="user-1",
+            message_id="message-show-changes",
+            text="show changes in this repo",
+        )
+    )
+
+    events = gateway.store.list_run_events(result.run_id)
+    tool_events = [event for event in events if event["event_type"] == "react.tool_call"]
+    tools = [event["payload"]["tool"] for event in tool_events]
+    assert "repo_status" in tools
+    assert "repo_diffstat" in tools
+
+
+async def test_gateway_operator_live_analyze_grounds_with_swing_not_kite(tmp_path) -> None:
+    swing_calls: list[dict] = []
+    kite_calls: list[dict] = []
+
+    async def _swing_exec(params, *, ctx):
+        swing_calls.append(dict(params))
+        return ToolResult(output='{"symbol":"LAURUSLABS","rsi":58.2}')
+
+    async def _kite_exec(params, *, ctx):
+        kite_calls.append(dict(params))
+        return ToolResult(output="kite called")
+
+    gateway = build_gateway(tmp_path, chat_runner=lambda messages, **_: LLMResponse(text="Grounded analysis complete."))
+    gateway.tool_registry.unregister("swing_analyze")
+    gateway.tool_registry.register(
+        ToolDef(
+            name="swing_analyze",
+            description="stub swing analyze",
+            input_schema={"type": "object"},
+            execute=_swing_exec,
+        )
+    )
+    gateway.tool_registry.register(
+        ToolDef(
+            name="kite.get_holdings",
+            description="stub kite",
+            input_schema={"type": "object"},
+            execute=_kite_exec,
+        )
+    )
+
+    await gateway.ingest(
+        NormalizedInboundEvent(
+            adapter="telegram",
+            channel_id="chat-1",
+            user_id="user-1",
+            message_id="message-live",
+            text="live laurus labs technical analysis now",
+        )
+    )
+
+    assert swing_calls == [{"symbol": "LAURUSLABS", "timeframe": "daily"}]
+    assert kite_calls == []
+
+
+async def test_gateway_operator_scan_nifty50_runs_strict_then_near_setups(tmp_path) -> None:
+    scan_modes: list[str] = []
+
+    async def _scan_exec(params, *, ctx):
+        mode = str(params.get("mode", "trade_ready"))
+        scan_modes.append(mode)
+        if mode == "trade_ready":
+            payload = {"parsed": {"mode": mode, "setups": [{"symbol": "AAA"}, {"symbol": "BBB"}], "setups_found": 2}}
+        else:
+            payload = {
+                "parsed": {
+                    "mode": mode,
+                    "setups": [{"symbol": "AAA"}, {"symbol": "BBB"}, {"symbol": "CCC"}, {"symbol": "DDD"}],
+                    "setups_found": 4,
+                }
+            }
+        return ToolResult(output=json.dumps(payload))
+
+    gateway = build_gateway(tmp_path, chat_runner=lambda messages, **_: LLMResponse(text="Scan complete."))
+    gateway.tool_registry.unregister("swing_scan")
+    gateway.tool_registry.register(
+        ToolDef(
+            name="swing_scan",
+            description="stub swing scan",
+            input_schema={"type": "object"},
+            execute=_scan_exec,
+        )
+    )
+
+    await gateway.ingest(
+        NormalizedInboundEvent(
+            adapter="telegram",
+            channel_id="chat-1",
+            user_id="user-1",
+            message_id="message-scan",
+            text="scan nifty50 top 10",
+        )
+    )
+
+    assert scan_modes[0] == "trade_ready"
+    assert "near_setups" in scan_modes
+
+
+async def test_gateway_operator_defaults_codex_propose_background(tmp_path) -> None:
+    captured: list[dict] = []
+    responses = iter(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ProviderToolCall(
+                        id="tool-codex",
+                        name="codex_propose",
+                        arguments={"repo_path": "/tmp/repo", "task": "add operator docs"},
+                    )
+                ]
+            ),
+            LLMResponse(text="Proposal queued."),
+        ]
+    )
+
+    async def _codex_exec(params, *, ctx):
+        captured.append(dict(params))
+        return ToolResult(output="ok")
+
+    gateway = build_gateway(tmp_path, chat_runner=lambda messages, **_: next(responses))
+    gateway.tool_registry.unregister("codex_propose")
+    gateway.tool_registry.register(
+        ToolDef(
+            name="codex_propose",
+            description="stub codex propose",
+            input_schema={"type": "object"},
+            execute=_codex_exec,
+        )
+    )
+
+    await gateway.ingest(
+        NormalizedInboundEvent(
+            adapter="telegram",
+            channel_id="chat-1",
+            user_id="user-1",
+            message_id="message-codex",
+            text="propose a fix for operator layer",
+        )
+    )
+
+    assert captured
+    assert captured[0]["background"] is True

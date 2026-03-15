@@ -1,6 +1,6 @@
 # Indian Equity Swing Trader
 
-TKM Framework + Technical Setups
+By AD–Ritesh (TKM Framework + Technical Setups)
 
 Disciplined swing trading for Indian equities on the daily timeframe. Scan for high-probability setups, size positions mechanically, enter with defined risk, trail stops, exit without emotion.
 

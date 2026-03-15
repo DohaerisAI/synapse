@@ -437,7 +437,7 @@ class RuntimeTuiApp(App[None]):
         self.set_interval(self.refresh_interval, self.refresh_view)
 
     def on_unmount(self) -> None:
-        self.runtime.stop_background_services()
+        self.runtime.shutdown()
 
     def _setup_tables(self) -> None:
         runs_table = self.query_one("#runs-table", DataTable)
@@ -624,7 +624,7 @@ class RuntimeTuiApp(App[None]):
         self.query_one("#config-status", Static).update(f"Saved to {env_path}")
 
     def action_reload_runtime(self) -> None:
-        self.runtime.stop_background_services()
+        self.runtime.shutdown()
         self.runtime = build_runtime(Path(self.root_path))
         self.runtime.start_background_services()
         self._populate_config_inputs()

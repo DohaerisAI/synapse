@@ -15,6 +15,7 @@ from synapse.providers import (
     ModelRouter,
     OpenAICodexResponsesProvider,
 )
+from synapse.store import SQLiteStore
 from synapse.streaming.sink import NullSink
 
 
@@ -177,6 +178,40 @@ class TestModelRouterStream:
         router = ModelRouter(auth_store)
         result = await router.generate_stream([])
         assert result is None
+
+
+class TestCodexCliUsageTracking:
+    @pytest.mark.asyncio
+    async def test_generate_records_usage_with_null_tokens(self, tmp_path) -> None:
+        store = SQLiteStore(tmp_path / "runtime.sqlite3")
+        store.initialize()
+        profile = AuthProfile(provider="codex-cli", model="gpt-5.4", settings={})
+        provider = CodexCliProvider(profile, workdir=str(tmp_path), store=store)
+
+        async def _fake_subprocess(*argv, **kwargs):
+            output_index = argv.index("-o") + 1
+            output_path = argv[output_index]
+            with open(output_path, "w", encoding="utf-8") as handle:
+                handle.write("cli response")
+            process = MagicMock()
+            process.returncode = 0
+            process.communicate = AsyncMock(return_value=(b"", b""))
+            return process
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(side_effect=_fake_subprocess)):
+            result = await provider.generate(
+                [{"role": "user", "content": "hello"}],
+                run_id="run-1",
+                session_key="sess-1",
+            )
+
+        assert result == "cli response"
+        usage_events = store.list_usage_events(run_id="run-1")
+        assert len(usage_events) == 1
+        assert usage_events[0].provider == "codex-cli"
+        assert usage_events[0].prompt_tokens is None
+        assert usage_events[0].completion_tokens is None
+        assert usage_events[0].status == "ok"
 
 
 # ---------------------------------------------------------------------------
