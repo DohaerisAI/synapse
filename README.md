@@ -53,16 +53,15 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 Then run the setup wizard:
 
 ```bash
-synapse onboard
+.venv/bin/python -m synapse onboard
 ```
 
-The wizard walks you through everything — LLM provider (Codex CLI, OAuth, Azure, or custom API), Telegram, Google Workspace, heartbeat, server config. It auto-detects existing credentials, probes endpoints, and writes your `.env.local`.
+The wizard walks you through everything — LLM provider (Codex CLI, OAuth, Azure, or custom API), Telegram, Google Workspace, MCP financial services, heartbeat, server config. It auto-detects existing credentials, reuses saved tokens, probes endpoints, and writes your `.env.local`.
 
 ```bash
-synapse serve
+.venv/bin/python -m synapse serve    # start the server
+.venv/bin/python -m synapse chat     # or interactive terminal chat
 ```
-
-Open your console at the configured address. You're live.
 
 ---
 
@@ -88,25 +87,27 @@ The self-model is also injected into every LLM context via `SELF.md` — so the 
 ## Architecture
 
 ```
-                    Telegram / API / Webhook
+                    Telegram / API / Terminal
                             │
                     [ Channel Adapter ]
                      normalize inbound
                             │
                       [ Gateway ]
-               session state machine (11 states)
                             │
-                     [ Planner ]
-              LLM-driven intent decomposition
-                            │
-                  [ Capability Broker ]
-             safe? risky? needs approval?
-                     ╱            ╲
-                 [ Host ]      [ Isolated ]
-                Executor        Executor
-                     ╲            ╱
-                  [ State Machine ]
-        RECEIVED → PLANNED → EXECUTING → COMPLETED
+               ┌────────────┴────────────┐
+               │                         │
+        [ Slash Commands ]        [ ReAct Loop ]
+         deterministic path       LLM + native tool calling
+         planner → executor       load_skill → shell_exec
+               │                         │
+               │              ┌──────────┼──────────┐
+               │              │          │          │
+               │        [ Builtins ] [ Skills ]  [ MCP ]
+               │         memory,     21 skills   Kite,
+               │         shell,      gws, swing  external
+               │         web, remind  trader     servers
+               │              │          │          │
+               └──────────────┴──────────┴──────────┘
                             │
                ┌────────────┼────────────┐
                │            │            │
@@ -120,41 +121,43 @@ The self-model is also injected into every LLM context via `SELF.md` — so the 
 
 | Decision | Rationale |
 |----------|-----------|
-| Explicit state machines | Implicit flow is unauditable. 11 states give full visibility into what the agent is doing and why. |
-| Capability Broker | Not everything should be auto-approved. "Read memory" is safe. "Send email" needs a human. Nuanced policy, not blanket rules. |
+| ReAct loop with native tool calling | Single LLM loop with tool_use. No multi-stage pipeline, no hardcoded routing. The model decides what to call. |
+| Skills + shell_exec | Drop a SKILL.md, restart, done. The LLM loads skills on demand and executes via shell. No code changes for new capabilities. |
+| Approval at the tool level | `shell_exec("gws gmail +triage")` is safe. `shell_exec("gws gmail send ...")` needs approval. Per-tool, per-command policy. |
 | Markdown memory | Three scopes (session, user, global). Human-readable, git-friendly, inspectable. Not opaque vector stores. |
-| LLM-driven routing | ActionPlanner asks the model to classify intents. No hardcoded `if "calendar" in message` keyword matching. |
-| Plugin SDK | Skills, channels, and hooks — drop a manifest + SKILL.md and it's discovered automatically. |
+| MCP for external services | Kite (Zerodha) connects via MCP. Stdio transport supports `mcp-remote` bridges. New brokers = new MCP connection. |
 | SQLite + WAL | Durable event log for audit trails. Every run, every approval, every failure — queryable. |
 
 ---
 
 ## What It Can Do Today
 
-**Google Workspace** — Gmail (send, search, triage), Calendar (agenda, create), Drive (search, upload), Docs (create, write), Sheets (read, append). All workspace actions are approval-gated.
+**Google Workspace** — Gmail (send, search, triage), Calendar (agenda, create), Drive (search, upload), Docs (create, write), Sheets (read, append). The LLM loads GWS skills and calls the `gws` CLI directly.
+
+**Swing Trading** — Scan Nifty 50/500/FnO stocks for setups (inside candle, NR7, volume dry-up, engulfing), full single-stock TA, TKM position sizing. Uses `tradingview_ta` — free, no API key.
+
+**Zerodha Kite (MCP)** — Holdings, positions, margins, order history, GTT placement. Connected via MCP protocol with OAuth login.
 
 **Telegram** — Full channel adapter with polling, streaming responses with live message editing, attachment handling.
 
-**Memory** — Durable markdown files across three scopes. The agent remembers context across sessions, users, and globally.
+**Memory** — Durable markdown files across three scopes (session, personal, global). The agent remembers context across conversations.
 
-**20 Bundled Skills** — GWS workflows (meeting prep, email triage), personal assistant patterns, grounded web research, memory stewardship, channel operations.
+**Terminal Chat** — Claude Code-style REPL with streaming, tool call tracing, slash commands.
 
-**Proactive Heartbeat** — Configurable periodic checks. The agent monitors things and reaches out on schedule, during your active hours.
+**Proactive Heartbeat** — Configurable periodic checks during active hours.
 
-**Operator Tooling** — Web console (12 pages), terminal TUI, health checks via `synapse doctor`, structured JSON logging.
+**Operator Tooling** — Web console, terminal TUI, `synapse doctor`, structured JSON logging.
 
-**Self-Awareness** — Introspection APIs, diagnosis engine, self-model injection. The agent knows its own capabilities and limitations as data, not vibes.
+**Self-Awareness** — Introspection APIs, diagnosis engine, self-model injection.
 
 ### What It Explicitly Cannot Do (Yet)
 
-We track limitations as first-class data, not footnotes:
+- Auto-apply code patches (disabled — proposal only)
+- Real Docker sandboxing (host execution only)
+- Channels beyond Telegram (Slack, Discord planned)
+- Self-author plugins autonomously (can propose, cannot auto-codegen)
 
-- Auto-apply code patches (disabled in MVP — `code.patch.apply` returns `allowed=False`)
-- Real Docker sandboxing (isolated executor runs on host for now)
-- Channels beyond Telegram (Slack, Discord, email are planned)
-- Self-author plugins autonomously (can propose, cannot auto-codegen yet)
-
-These show up in `GET /api/self` under `limitations`. The agent knows about them and won't hallucinate capabilities it doesn't have.
+These show up in `GET /api/self` under `limitations`.
 
 ---
 
@@ -162,17 +165,17 @@ These show up in `GET /api/self` under `limitations`. The agent knows about them
 
 `synapse onboard` is an interactive terminal wizard with:
 
-- **4 LLM providers** — Codex CLI (auto-detects `~/.codex/auth.json`), Codex OAuth (browser flow), Azure OpenAI, or any OpenAI-compatible API
+- **4 LLM providers** — Codex CLI (auto-detects auth), Codex OAuth (browser flow), Azure OpenAI, or any OpenAI-compatible API
+- **MCP financial services** — Zerodha Kite, TradingView, with token reuse and stdio transport support
 - **Live probes** — verifies credentials, checks endpoints, validates bot tokens before saving
-- **Step-by-step flow** — Agent identity → Provider → Telegram → GWS → Heartbeat → Server
-- **Systemd integration** — `--install-daemon` sets up a user service that starts on boot
+- **Token reuse** — existing Telegram and Kite tokens are preserved, not re-prompted
+- **Systemd integration** — `--install-daemon` sets up a user service
 
 ```bash
 synapse onboard                      # full interactive setup
 synapse onboard --flow quickstart    # just name + provider, defaults for rest
 synapse onboard --install-daemon     # also install systemd service
 synapse doctor                       # verify everything works
-synapse doctor --json                # machine-readable health check
 ```
 
 ---
@@ -181,6 +184,7 @@ synapse doctor --json                # machine-readable health check
 
 ```bash
 synapse serve                # start the runtime server
+synapse chat                 # interactive terminal chat (REPL)
 synapse tui                  # operator terminal dashboard
 synapse onboard              # interactive setup wizard
 synapse configure            # re-run wizard sections
@@ -211,11 +215,6 @@ AZURE_OPENAI_ENDPOINT=https://myorg.openai.azure.com
 AZURE_OPENAI_API_KEY=sk-...
 AZURE_OPENAI_MODEL=gpt-5.2-chat
 
-# Or Custom API
-CUSTOM_API_BASE_URL=https://api.example.com/v1
-CUSTOM_API_KEY=sk-...
-CUSTOM_API_MODEL=my-model
-
 # Telegram
 TELEGRAM_BOT_TOKEN=your-bot-token
 TELEGRAM_POLLING_ENABLED=1
@@ -233,6 +232,26 @@ HEARTBEAT_ENABLED=1
 HEARTBEAT_EVERY_MINUTES=10
 ```
 
+MCP connections are configured in `mcp.yaml` (gitignored, contains tokens):
+
+```yaml
+enabled: true
+connections:
+  - server_id: kite
+    url: "https://mcp.kite.trade/mcp"
+    auth:
+      auth_type: oauth
+      token: "your-kite-token"
+    enabled: true
+  - server_id: upstox
+    url: "https://mcp.upstox.com/mcp"
+    transport: stdio
+    command: "npx mcp-remote"
+    auth:
+      auth_type: oauth
+    enabled: false
+```
+
 ---
 
 ## Project Structure
@@ -240,24 +259,28 @@ HEARTBEAT_EVERY_MINUTES=10
 ```
 synapse/
   config/          typed Pydantic schema + env loader
-  gateway/         13 decomposed orchestration modules
+  gateway/         orchestration (core, planner, state, context, ingest)
   channels/        channel adapters (Telegram)
+  tools/           tool registry, builtins, MCP tools
+  mcp/             MCP client (HTTP + stdio transports)
   plugins/         plugin SDK — discovery, loading, registry
-  wizard/          interactive setup wizard (8 modules)
+  wizard/          interactive setup wizard
   streaming/       response streaming with live editing
-  app.py           FastAPI with 12-page web console
+  app.py           FastAPI with web console
   runtime.py       lifecycle, heartbeat, background services
-  broker.py        capability decisions + approval gates
-  executors.py     host + isolated execution
+  react_loop.py    ReAct agent loop with native tool calling
+  repl.py          terminal chat with streaming
+  executors.py     host execution for slash commands
   memory.py        markdown-first durable storage
   store.py         SQLite — runs, events, approvals
   self_model.py    typed self-awareness schemas
   introspection.py runtime capability discovery
   diagnosis.py     failure analysis + gap detection
+  approvals.py     tool-level approval gates
   hooks.py         lifecycle event hooks
   skills.py        skill registry + matching
-skills/            20 bundled skills
-tests/             246 tests across 26 files
+skills/            21 bundled skills (GWS, swing-trader, assistant)
+tests/             340 tests across 28 files
 ```
 
 ---
@@ -265,7 +288,7 @@ tests/             246 tests across 26 files
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q     # 246 tests
+.venv/bin/python -m pytest -q     # 340 tests
 ```
 
 ---
