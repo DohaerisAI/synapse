@@ -1,0 +1,79 @@
+---
+title: "Codex Proposals"
+description: "The agent proposes code changes. You decide what gets applied."
+---
+
+## The workflow
+
+Synapse can generate code change proposals but never auto-applies them. You stay in control.
+
+```
+You: add dark mode support to the dashboard
+Synapse: generating proposal...
+
+Proposal p_abc123 ready:
+• PLAN.md — what will change and why
+• PATCH.diff — the actual git diff
+• TESTS.md — test commands to run
+
+Apply it? (requires approval)
+```
+
+## Generating a proposal
+
+Just ask:
+
+> _"Generate a proposal to add X"_
+> _"Write a proposal for refactoring Y"_
+
+Or run in the background for long generations:
+
+> _"Generate a proposal for X — run in background"_
+
+## Proposal files
+
+Each proposal gets a directory: `var/proposals/<id>/`
+
+| File | Contents |
+|------|----------|
+| `PLAN.md` | What will change, why, risks |
+| `PATCH.diff` | Unified diff, ready for `git apply` |
+| `TESTS.md` | Test commands to verify the change |
+| `SUMMARY.md` | One-paragraph summary |
+
+## Applying a proposal
+
+Requires explicit approval:
+
+> _"Apply proposal p_abc123"_
+
+Synapse sends an approval prompt. Reply `yes` to apply via `git apply`. Reply `no` to skip.
+
+`codex_apply_proposal` always requires approval — it cannot be added to the allowlist.
+
+## Testing a proposal
+
+Run the proposal's tests in a sandboxed temp directory without touching the live codebase:
+
+> _"Test proposal p_abc123"_
+
+Synapse patches a temp copy of the repo, runs the test commands from `TESTS.md`, and reports results.
+
+## API
+
+```bash
+# List proposals
+GET /api/proposals
+
+# Get a proposal
+GET /api/proposals/{id}
+
+# Apply (still requires interactive approval)
+POST /api/proposals/{id}/apply
+```
+
+## The codex skill
+
+The `codex` skill (at `skills/codex/`) contains full documentation for the proposal workflow. Load it for detailed guidance:
+
+> _"Load the codex skill"_

@@ -1,0 +1,76 @@
+---
+title: "Self-Awareness"
+description: "Synapse knows what it is, what it can do, and what it can't."
+---
+
+## The idea
+
+Every agent framework tells you what it can do. Synapse tells _itself_ what it can do — and reasons with that knowledge in every conversation.
+
+The agent carries a structured self-model: identity, architecture, capabilities, and limitations. This is injected as `SELF.md` into every LLM context, so it reasons with accurate facts about itself rather than hallucinating capabilities it doesn't have.
+
+## Self-model
+
+```bash
+GET /api/self
+```
+
+Returns the full self-model snapshot:
+
+```json
+{
+  "identity": {
+    "name": "Synapse",
+    "role": "personal agent runtime",
+    "version": "0.1.0"
+  },
+  "architecture": {
+    "loop": "ReAct with native tool calling",
+    "channels": ["telegram", "terminal"],
+    "providers": ["codex", "azure"]
+  },
+  "capabilities": [...],
+  "limitations": [
+    "Docker sandboxing is opt-in, off by default",
+    "Channels limited to Telegram and terminal"
+  ]
+}
+```
+
+Or ask in Telegram:
+
+> _"What can you do?"_
+> _"What are your limitations?"_
+
+## Diagnosis
+
+The diagnosis engine analyzes historical runs to find patterns in what fails:
+
+```bash
+GET /api/diagnosis
+```
+
+Returns:
+- Common failure action families
+- Frequency of `action.unsupported` events
+- Suggested new skills or capabilities to add
+
+Or ask:
+
+> _"What are you bad at?"_
+> _"What would make you more useful?"_
+
+## SELF.md
+
+`SELF.md` is a workspace file at the repo root. It's injected into every LLM context as structured self-description. The `RuntimeIntrospector` keeps it in sync with actual runtime state on startup.
+
+You can edit `SELF.md` directly to adjust the agent's self-description and behavior.
+
+## Builtins
+
+| Tool | What it returns |
+|------|----------------|
+| `self_describe` | Full self-model |
+| `self_health` | Runtime health: DB, providers, MCP, skills |
+| `self_capabilities` | All registered tools and capabilities |
+| `diagnosis_report` | Gap analysis with improvement suggestions |

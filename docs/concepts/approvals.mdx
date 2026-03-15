@@ -1,0 +1,49 @@
+---
+title: "Approvals"
+description: "Tool-level approval gates. Per-tool policy with a persistent allowlist."
+---
+
+## How it works
+
+Every tool in Synapse has a `needs_approval` flag. When the ReAct loop wants to call an approval-required tool, it checks `ApprovalManager`:
+
+1. **Allowlisted** — tool is in `var/approvals.json` → execute immediately, no prompt
+2. **Not allowlisted** — send approval prompt to channel, wait for response:
+   - `yes` → execute once
+   - `no` → skip, inform the LLM
+   - `yes always` → persist to allowlist, execute, never ask again for this tool
+
+## Which tools need approval
+
+| Tool | Why |
+|------|-----|
+| `shell_exec` (write commands) | Runs arbitrary shell commands |
+| `gws gmail send` | Sends email on your behalf |
+| `gws calendar event create` | Creates calendar events |
+| `codex_apply_proposal` | Applies a code patch via `git apply` |
+| `patch_apply` | Applies raw patches |
+| `fs_write` / `fs_edit` | Writes files outside `skills/` and `var/proposals/` |
+| `gws_exec` | Arbitrary GWS CLI fallback |
+
+Read-only tools (memory reads, web search, `shell_exec` with read-only git commands, `fs_read`) never need approval.
+
+## Persistent allowlist
+
+`var/approvals.json` — a simple JSON map of tool name patterns to `"always"`. Persisted across restarts.
+
+```json
+{
+  "shell_exec": "always",
+  "memory_write": "always"
+}
+```
+
+You can edit this file directly or let the agent populate it via `yes always` responses.
+
+## Legacy approval records
+
+The SQLite `approvals` table tracks all approval decisions — approved, denied, allowlist grants — for audit purposes.
+
+## No silent bypass
+
+There is no auto-approve path. If an approval-required tool's channel callbacks are not available (e.g. during a heartbeat), the tool is skipped and the LLM is informed.

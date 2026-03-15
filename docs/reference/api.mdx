@@ -1,0 +1,85 @@
+---
+title: "REST API"
+description: "All HTTP endpoints exposed by synapse serve."
+---
+
+Base URL: `http://localhost:8000`
+
+## Runs
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/runs` | List recent runs |
+| GET | `/api/runs/{run_id}` | Get a run with all events |
+| GET | `/api/runs/{run_id}/events` | Stream run events (SSE) |
+
+## Sessions
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/sessions` | List active sessions |
+| GET | `/api/sessions/{key}` | Get session details |
+
+## Skills
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/skills` | List loaded skills |
+| POST | `/api/skills/reload` | Trigger hot reload |
+| POST | `/api/skills/install` | Install skill bundle (multipart) |
+
+## Jobs
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/jobs` | List jobs |
+| POST | `/api/jobs` | Create a background job |
+| GET | `/api/jobs/{id}` | Get job status + artifacts |
+| POST | `/api/jobs/{id}/cancel` | Cancel a running job |
+
+## Usage
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/usage/summary` | Aggregate token + cost summary |
+| GET | `/api/usage/runs` | Usage broken down by run |
+| GET | `/api/usage/models` | Usage broken down by model |
+
+## Proposals
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/proposals` | List proposals |
+| GET | `/api/proposals/{id}` | Get proposal files |
+| POST | `/api/proposals/{id}/apply` | Apply (still requires interactive approval) |
+
+## Approvals
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/approvals` | List approval records |
+| POST | `/api/approvals/{id}/respond` | Respond to a pending approval |
+
+## Self + Diagnosis
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/self` | Full self-model snapshot |
+| GET | `/api/diagnosis` | Gap analysis + suggestions |
+
+## Health
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Runtime health check |
+
+## Web console
+
+| Path | Description |
+|------|-------------|
+| `/console` | Main dashboard |
+| `/console/usage` | Usage dashboard |
+| `/console/jobs` | Jobs dashboard |
+| `/console/skills` | Skills dashboard |
+| `/console/self` | Self-model viewer |
+| `/console/diagnosis` | Diagnosis viewer |

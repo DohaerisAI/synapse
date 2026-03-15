@@ -1,0 +1,109 @@
+---
+title: "Built-in Tools"
+description: "All tools available in every run — memory, shell, fs, repo, web, codex, swing, usage."
+---
+
+## Memory
+
+| Tool | Description |
+|------|-------------|
+| `memory_read` | Read memory from session, user, or global scope |
+| `memory_write` | Write or append to a memory scope |
+| `memory_delete` | Remove an entry or clear a scope |
+| `memory_search` | Search across all memory scopes |
+
+## Self-awareness
+
+| Tool | Description |
+|------|-------------|
+| `self_describe` | Full self-model: identity, architecture, capabilities |
+| `self_health` | Runtime health snapshot |
+| `self_capabilities` | List all registered capabilities and tools |
+| `diagnosis_report` | Gap analysis: common failures and improvement suggestions |
+
+## Web
+
+| Tool | Description | Approval |
+|------|-------------|---------|
+| `web_search` | Web search via configured search provider | None |
+| `web_fetch` | Fetch and extract text from a URL | None |
+
+## Shell
+
+| Tool | Description | Approval |
+|------|-------------|---------|
+| `shell_exec` | Run a shell command | Read-only git commands: none. Write commands: required |
+
+`shell_exec` is the primary way skills execute. Read-only git inspection (`git status`, `git diff`, `git log`) is approval-free. Any command that writes, sends, or modifies requires approval or an allowlist entry.
+
+## File system
+
+| Tool | Description | Approval |
+|------|-------------|---------|
+| `fs_read` | Read a file (repo-root enforced by default) | None |
+| `fs_write` | Write a file | Required (unless inside `skills/` or `var/proposals/`) |
+| `fs_edit` | Edit a file (string replacement) | Required |
+| `patch_apply` | Apply a unified diff via `git apply` | Always required |
+
+Set `FS_ALLOW_ABSOLUTE=1` to allow paths outside the repo root.
+Set `FS_REQUIRE_APPROVAL=1` to force approval for all fs mutations including inside `skills/`.
+
+## Repo inspection
+
+| Tool | Description |
+|------|-------------|
+| `repo_status` | `git status -sb` |
+| `repo_diffstat` | `git diff --stat` |
+| `repo_diff` | `git diff` with optional path filter |
+| `repo_grep` | `git grep` with pattern and optional path |
+| `repo_open` | Read a file from the repo |
+
+All repo tools are read-only and approval-free.
+
+## Codex proposals
+
+| Tool | Description | Approval |
+|------|-------------|---------|
+| `codex_propose` | Generate a proposal bundle (PLAN.md, PATCH.diff, TESTS.md) | None (supports `background: true`) |
+| `codex_apply_proposal` | Apply a proposal's patch via `git apply` | Always required |
+| `codex_run_tests` | Run tests against a proposal in a sandbox | None (supports `background: true`) |
+
+Proposals are written to `var/proposals/<id>/` and tracked in SQLite.
+
+## Swing trading
+
+| Tool | Description |
+|------|-------------|
+| `swing_analyze` | Full TA for a single stock: RSI, MACD, support/resistance, setup |
+| `swing_scan` | Scan a watchlist for a specific setup pattern |
+
+Both resolve the `swing-trader` skill and execute via `CommandRunner`. No skill load step needed.
+
+## Skills
+
+| Tool | Description |
+|------|-------------|
+| `load_skill` | Load the full SKILL.md for a skill by ID |
+
+## Reminders
+
+| Tool | Description |
+|------|-------------|
+| `reminder_create` | Create a time-based reminder |
+
+## Usage
+
+| Tool | Description |
+|------|-------------|
+| `usage` | Compact usage summary: tokens, cost, top models |
+
+## Background flag
+
+`shell_exec`, `codex_propose`, and `codex_run_tests` support `"background": true` in their params. The tool returns a job ID immediately; the actual work runs in a background thread and delivers results when done.
+
+```
+You: run the test suite in the background
+Agent: started job job_abc123 — I'll message you when it's done
+[... 2 minutes later ...]
+Agent: job_abc123 done. 440 passed, 0 failed.
+```

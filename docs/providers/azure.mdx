@@ -1,0 +1,23 @@
+---
+title: "Azure OpenAI"
+description: "Use an Azure OpenAI deployment as your LLM provider."
+---
+
+```bash
+AZURE_OPENAI_ENDPOINT=https://myorg.openai.azure.com
+AZURE_OPENAI_API_KEY=sk-...
+AZURE_OPENAI_MODEL=gpt-5.2-chat
+AZURE_OPENAI_API_VERSION=2024-12-01-preview
+```
+
+## Native tool calling
+
+Azure OpenAI supports function calling. Synapse sends tool schemas from `ToolRegistry` as the `tools` parameter in the chat completions request.
+
+## Deployment names
+
+`AZURE_OPENAI_MODEL` should match your Azure deployment name, not the base model name.
+
+## API version
+
+Use `2024-12-01-preview` or later for best tool calling support.

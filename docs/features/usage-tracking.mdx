@@ -1,0 +1,55 @@
+---
+title: "Usage Tracking"
+description: "Per-provider token and cost tracking."
+---
+
+## What it tracks
+
+Every LLM call and every tool execution is logged in SQLite:
+
+- **Provider usage** — model, input tokens, output tokens, duration, status
+- **Tool events** — tool name, params, result, duration, success/failure
+
+## Viewing usage
+
+In Telegram or terminal:
+
+```
+/usage
+```
+
+Returns a compact summary: total tokens, cost by model, top tools.
+
+## API
+
+```bash
+# Summary
+GET /api/usage/summary
+
+# By run
+GET /api/usage/runs?limit=20
+
+# By model
+GET /api/usage/models
+```
+
+## Pricing
+
+Set pricing per model in `PRICING_JSON`:
+
+```json
+{
+  "gpt-5.4": { "input_per_1m": 2.50, "output_per_1m": 10.00 },
+  "gpt-4o": { "input_per_1m": 2.50, "output_per_1m": 10.00 }
+}
+```
+
+```bash
+PRICING_JSON=/path/to/pricing.json
+```
+
+If no pricing is set, usage is tracked in tokens only (no cost calculation).
+
+## Web console
+
+Open `http://localhost:8000/console/usage` for a browser-based usage dashboard.

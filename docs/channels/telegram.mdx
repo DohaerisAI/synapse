@@ -1,0 +1,75 @@
+---
+title: "Telegram"
+description: "Connect Synapse to Telegram with polling, streaming replies, and approval flows."
+---
+
+## Setup
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token
+2. Run `synapse onboard` and enter the token when prompted — it validates live
+3. Or set manually: `TELEGRAM_BOT_TOKEN=your-token`
+
+Enable polling:
+```bash
+TELEGRAM_POLLING_ENABLED=1
+```
+
+## Restricting access
+
+Lock the bot to specific chats:
+
+```bash
+TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
+```
+
+Only messages from these chat IDs will be processed.
+
+## Streaming replies
+
+Synapse streams replies in real time using `TelegramDraftStream`. As the LLM generates its response, you see it being typed out — exactly like a person typing. The message is edited live, then finalized.
+
+For DMs, draft streaming is enabled by default. For groups, it falls back to a single final send (Telegram API limitations).
+
+## Approval flow
+
+When the LLM wants to call an approval-required tool, Synapse sends an inline approval prompt:
+
+```
+🔐 Approval required
+Tool: shell_exec
+Command: gws gmail send --to you@example.com ...
+
+Reply with:
+• yes — approve once
+• no — deny
+• yes always — approve and never ask again
+```
+
+Reply in the same chat and the loop resumes. `yes always` persists to the allowlist.
+
+## Attachments
+
+Synapse handles:
+- **Images** — extracted and sent to the LLM with vision
+- **Documents/PDFs** — extracted text included in context
+- **Voice messages** — (Telegram sends as audio)
+
+## Slash commands
+
+Commands handled deterministically (no LLM call):
+
+| Command | What it does |
+|---------|-------------|
+| `/skills` | List loaded skills |
+| `/memory` | Show current memory |
+| `/clear` | Clear session memory |
+| `/health` | Runtime health check |
+| `/usage` | Token and cost summary |
+
+## Formatting
+
+Synapse renders replies as Telegram HTML (`parse_mode=HTML`). Code blocks, bold, and italic are rendered natively. Internal formatting sentinels are stripped before delivery so they never appear in chat.
+
+## Long replies
+
+Replies over 4096 characters are split into multiple messages while preserving formatting boundaries.

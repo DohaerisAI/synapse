@@ -1,0 +1,55 @@
+---
+title: "Quickstart"
+description: "Install Synapse and run your first conversation in minutes."
+---
+
+## Prerequisites
+
+- Python 3.12+
+- A Telegram bot token ([@BotFather](https://t.me/BotFather))
+- An LLM provider: Codex CLI (recommended), Azure OpenAI, or any OpenAI-compatible API
+
+## Install
+
+```bash
+git clone https://github.com/DohaerisAI/synapse.git
+cd synapse
+python3 -m venv .venv && .venv/bin/pip install -e .
+```
+
+## Run the wizard
+
+The onboarding wizard walks you through everything — LLM provider, Telegram, Google Workspace, MCP connections, heartbeat, and server config.
+
+```bash
+.venv/bin/python -m synapse onboard
+```
+
+It auto-detects existing credentials, reuses saved tokens, and writes `.env.local`.
+
+## Start the server
+
+```bash
+.venv/bin/python -m synapse serve
+```
+
+Or use the terminal chat REPL:
+
+```bash
+.venv/bin/python -m synapse chat
+```
+
+## Verify it works
+
+```bash
+.venv/bin/python -m synapse doctor
+```
+
+This checks your LLM connection, Telegram bot, GWS, MCP servers, and SQLite store.
+
+## What's next
+
+- [Onboarding walkthrough](/get-started/onboarding) — step-by-step wizard details
+- [Configuration reference](/get-started/configuration) — all env flags
+- [Skills](/concepts/skills) — add new capabilities
+- [Telegram setup](/channels/telegram) — polling, streaming, approval flows

@@ -1,0 +1,50 @@
+---
+title: "Memory"
+description: "Durable markdown memory across three scopes. Human-readable, inspectable."
+---
+
+## Three scopes
+
+| Scope | File | When to use |
+|-------|------|-------------|
+| **Session** | `var/memory/session/<session_key>.md` | Notes for the current conversation |
+| **User** | `var/memory/user.md` | Persistent facts about the user — preferences, role, context |
+| **Global** | `var/memory/global.md` | General knowledge, recurring instructions, cross-session state |
+
+## Using memory in Telegram
+
+The agent writes to memory automatically when it learns something worth keeping. You can also ask it explicitly:
+
+- _"Remember that I prefer concise replies"_
+- _"Note: my timezone is IST"_
+- _"Forget what you stored about my schedule"_
+
+## Tools
+
+The agent has four memory builtins:
+
+| Tool | What it does |
+|------|-------------|
+| `memory_read` | Read from one or all scopes |
+| `memory_write` | Write or append to a scope |
+| `memory_delete` | Remove an entry or clear a scope |
+| `memory_search` | Fuzzy search across all scopes |
+
+## Format
+
+Memory files are plain markdown. Each entry is a heading + content block. The agent can read and reason over them directly — no vector store, no embeddings.
+
+```markdown
+## User preferences
+- Prefers concise replies
+- Timezone: IST
+- Works in fintech, senior engineer
+
+## Trading context
+- Focuses on Nifty 50 and midcap
+- TKM position sizing: 1% risk per trade
+```
+
+## Context injection
+
+At the start of every turn, relevant memory is injected into the system prompt. Session memory is always included. User and global memory are summarized and included if within the context budget.

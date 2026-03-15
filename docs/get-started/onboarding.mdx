@@ -1,0 +1,64 @@
+---
+title: "Onboarding Wizard"
+description: "synapse onboard walks you through every config option interactively."
+---
+
+Run the wizard with:
+
+```bash
+synapse onboard
+```
+
+Or for a quick minimal setup:
+
+```bash
+synapse onboard --flow quickstart
+```
+
+To also install a systemd user service:
+
+```bash
+synapse onboard --install-daemon
+```
+
+## What it configures
+
+### LLM Provider
+
+Choose one of four providers:
+
+| Provider | When to use |
+|----------|-------------|
+| **Codex CLI** | You have OpenAI Codex CLI installed — auto-detects `~/.codex/auth.json` |
+| **Codex OAuth** | Browser-based OAuth flow for Codex |
+| **Azure OpenAI** | Enterprise Azure endpoint with API key |
+| **OpenAI-compatible** | Any API with OpenAI-compatible `/chat/completions` |
+
+### Telegram
+
+Enter your bot token from [@BotFather](https://t.me/BotFather). The wizard validates the token live before saving. Polling is enabled by default.
+
+### Google Workspace
+
+Configure GWS credentials and pick which services to enable:
+- Gmail, Calendar, Drive, Docs, Sheets
+
+### MCP servers
+
+Add connections to MCP-compatible services (Kite, Upstox, custom). The wizard supports both HTTP OAuth and stdio (`mcp-remote`) transports.
+
+### Heartbeat
+
+Enable periodic proactive checks during configured active hours.
+
+## What gets written
+
+- `.env.local` — all credentials and config (gitignored)
+- `mcp.yaml` — MCP server connections (gitignored)
+
+## Re-run sections
+
+```bash
+synapse configure    # re-run individual wizard sections
+synapse doctor       # verify everything is working
+```

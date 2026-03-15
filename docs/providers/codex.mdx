@@ -1,0 +1,39 @@
+---
+title: "OpenAI Codex"
+description: "Use Codex CLI or the Codex Responses API as your LLM provider."
+---
+
+## Codex CLI (recommended)
+
+Uses the locally installed Codex CLI with its existing auth.
+
+```bash
+CODEX_MODEL=gpt-5.4
+CODEX_AUTH_FILE=~/.codex/auth.json
+CODEX_TRANSPORT=responses
+```
+
+`CODEX_TRANSPORT=responses` uses the Responses API with native tool calling (recommended). `CODEX_TRANSPORT=cli` falls back to subprocess mode.
+
+## Codex OAuth
+
+Browser-based OAuth flow — the wizard handles this.
+
+```bash
+CODEX_TRANSPORT=responses
+CODEX_OAUTH_CLIENT_ID=...
+CODEX_OAUTH_TOKEN_FILE=~/.synapse/codex_token.json
+```
+
+## Native tool calling
+
+The Codex Responses API supports native tool definitions. Synapse passes `ToolRegistry.tool_schemas_for_llm()` as the `tools` parameter — the model can call any registered tool natively.
+
+## Models
+
+| Model | Notes |
+|-------|-------|
+| `gpt-5.4` | Default, best quality |
+| `gpt-4o` | Faster, lower cost |
+
+Set with `CODEX_MODEL`.

@@ -1,0 +1,24 @@
+---
+title: "OpenAI-compatible"
+description: "Use any OpenAI-compatible API — local models, Together, Groq, etc."
+---
+
+```bash
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o
+```
+
+Point `OPENAI_BASE_URL` at any compatible endpoint:
+
+| Provider | Base URL |
+|----------|----------|
+| OpenAI | `https://api.openai.com/v1` |
+| Together AI | `https://api.together.xyz/v1` |
+| Groq | `https://api.groq.com/openai/v1` |
+| Ollama (local) | `http://localhost:11434/v1` |
+| LM Studio | `http://localhost:1234/v1` |
+
+## Tool calling support
+
+Native tool calling works when the endpoint supports it. If the model doesn't support function calling, Synapse falls back to a text-based tool invocation format.

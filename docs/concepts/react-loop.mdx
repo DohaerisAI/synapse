@@ -1,0 +1,72 @@
+---
+title: "ReAct Loop"
+description: "How Synapse calls tools and produces replies — one loop, no pipeline."
+---
+
+## What it is
+
+The ReAct loop is the core agent execution model. It replaces a multi-stage pipeline (intent classification → workflow planning → executor → renderer) with a single loop:
+
+```
+message arrives
+    │
+build system prompt + tool list
+    │
+call LLM
+    │
+LOOP:
+  if tool_use blocks in response:
+    for each tool call:
+      check approval (allowlist or interactive)
+      execute tool
+      collect result
+    append results to messages
+    call LLM again → continue loop
+  if text-only response:
+    deliver as reply
+    break
+```
+
+**No intent classification.** The LLM decides whether to call tools or respond with text based on the available tool list and system prompt.
+
+**No workflow planner.** The LLM calls tools directly. The result of each call is fed back immediately.
+
+**No separate renderer.** The LLM's text response _is_ the reply.
+
+## System prompt
+
+The system prompt is compiled by `ContextBuilder` and includes:
+
+- Identity and persona instructions
+- Workspace files: `SELF.md`, `USER.md`, `ASSISTANT.md`, `OPERATIONS.md`, `NOW.md`
+- Compact skill index (name + description for all loaded skills)
+- User memory and session notes
+- Tool usage guidance (when to use `shell_exec` vs builtins, approval policy, etc.)
+
+## Tool list
+
+Assembled per-turn from `ToolRegistry`:
+- **Builtins** — memory, shell, fs/repo, web, codex, swing, usage
+- **Skill manifest tools** — tools declared in `manifest.json` of loaded skills
+- **MCP tools** — auto-registered from connected MCP servers
+
+## Approval in the loop
+
+When a tool has `needs_approval=True`, the loop checks `ApprovalManager`:
+1. If the tool is in the persistent allowlist (`var/approvals.json`) → execute immediately
+2. Otherwise → pause, send approval prompt via channel, wait for yes/no/always
+3. "always" → persist to allowlist, execute, continue
+
+[Full approval docs →](/concepts/approvals)
+
+## Streaming
+
+While the loop is running, partial text chunks are streamed to Telegram via `TelegramDraftStream` — the user sees the reply being written in real time, like typing.
+
+## Turn limits
+
+Default max turns: 10. Each tool call + LLM response = 1 turn. If the limit is hit, the loop returns the last text response or an error message.
+
+## NO_REPLY
+
+If the LLM's final response is the literal string `NO_REPLY`, the loop suppresses delivery. Used for heartbeat runs and silent operations where no user-facing reply is needed.

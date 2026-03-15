@@ -1,0 +1,53 @@
+---
+title: "MCP Integration"
+description: "Connect external services via the Model Context Protocol."
+---
+
+## What is MCP
+
+MCP (Model Context Protocol) is a standard for connecting agents to external tool servers. Synapse auto-discovers all tools from connected MCP servers and registers them in `ToolRegistry`.
+
+## Configuration
+
+Add connections to `mcp.yaml`:
+
+```yaml
+enabled: true
+connections:
+  - server_id: kite
+    url: "https://mcp.kite.trade/mcp"
+    auth:
+      auth_type: oauth
+      token: "your-kite-token"
+    enabled: true
+
+  - server_id: my-local-server
+    transport: stdio
+    command: "npx mcp-remote https://my-server.com/mcp"
+    auth:
+      auth_type: oauth
+    enabled: true
+```
+
+## Transports
+
+| Transport | When to use |
+|-----------|-------------|
+| **HTTP** | Remote MCP servers with OAuth or API key auth |
+| **stdio** | Local MCP servers or `mcp-remote` bridge proxies |
+
+## Auto-registration
+
+When Synapse starts, it connects to all enabled MCP servers and calls `list_tools()`. Every discovered tool is wrapped in a `ToolDef` and registered in `ToolRegistry`. No manual mapping needed.
+
+## Supported services
+
+| Service | What you get |
+|---------|-------------|
+| **Zerodha Kite** | Holdings, positions, margins, orders, GTT |
+| **Upstox** | (stdio via mcp-remote) |
+| Any MCP server | All tools auto-registered |
+
+## Security
+
+MCP connections are validated at startup. OAuth tokens are stored in `mcp.yaml` (gitignored). Each MCP call is logged in SQLite for audit.

@@ -1,0 +1,94 @@
+---
+title: "Architecture"
+description: "How Synapse is structured — from inbound message to LLM reply."
+---
+
+## The full pipeline
+
+```
+Telegram / Terminal REPL / REST API
+              │
+      [ Channel Adapter ]
+        normalize inbound event
+              │
+          [ Gateway ]
+         session lane (one run per session)
+              │
+       ┌──────┴──────┐
+       │             │
+ [ Slash Command ] [ ReAct Loop ]
+  /skills, /memory   LLM + native tool calling
+  deterministic       multi-turn until text reply
+       │             │
+       │      [ Operator Layer ]
+       │      policy defaults, grounding,
+       │      repo-change enforcement
+       │             │
+       │      ┌──────┼──────┐
+       │   Builtins Skills  MCP
+       │   memory   hot-reload  Kite
+       │   shell    installable external
+       │   fs/repo  gws, swing  servers
+       │   codex
+       │             │
+       └──────────────┘
+              │
+  ┌───────────┼───────────┐
+[ Memory ] [ SQLite ]  [ Jobs ]
+ markdown    runs,       background
+ 3 scopes    events,     execution
+             approvals,
+             jobs, usage,
+             proposals
+```
+
+## Key components
+
+### Channel Adapter
+
+Normalizes inbound events from Telegram (or terminal) into a `NormalizedInboundEvent`. Handles attachments, captions, and edit events.
+
+### Gateway
+
+The central orchestrator. For each inbound event it:
+1. Creates a `RunRecord` in SQLite
+2. Checks for slash commands (deterministic path)
+3. Otherwise runs the ReAct loop
+4. Delivers the reply via the channel adapter
+
+One **session lane** per session — messages in the same session are processed serially, no race conditions.
+
+### ReAct Loop (`react_loop.py`)
+
+The core agent loop. Calls the LLM with a tool list, executes tool calls, feeds results back, repeats until the LLM returns a text-only response.
+
+No intent classification step. No workflow planner. The LLM decides what to call based on the system prompt + available tools. [Full details →](/concepts/react-loop)
+
+### Operator Layer (`operator.py`)
+
+Sits between the gateway and the loop. Enforces deterministic policy:
+- Repo-change questions must inspect with git tools before answering
+- Swing/market-data questions route to `swing_analyze` before numeric replies
+- Tool substitution and fallback defaults
+
+Not a router — doesn't make routing decisions. Adds policy notes and can substitute tool calls.
+
+### Tool Registry (`tools/registry.py`)
+
+Flat registry of `ToolDef` objects. Each tool has a name, description, JSON schema for params, an async execute function, and a `needs_approval` flag.
+
+Sources: builtins, skill manifest tools, MCP server tools (auto-registered).
+
+### Skills (`skills.py`, `skill_runtime.py`)
+
+Drop a directory under `skills/` with `manifest.json` + `SKILL.md`. The agent loads skills on demand via `load_skill`. Hot reload detects adds/edits/removes via mtime polling. Packages (zip bundles) can be installed via API.
+
+[Full details →](/concepts/skills)
+
+### Memory (`memory.py`)
+
+Durable markdown files at three scopes: session, user, global. Human-readable and inspectable. [Full details →](/concepts/memory)
+
+### SQLite Store (`store.py`)
+
+Append-only event log for everything: runs, events, approvals, tool calls, background jobs, usage, Telegram delivery, proposals.

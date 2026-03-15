@@ -1,0 +1,34 @@
+---
+title: "CLI Reference"
+description: "All synapse commands."
+---
+
+```bash
+synapse serve                # start the runtime server
+synapse chat                 # interactive terminal chat (REPL)
+synapse tui                  # operator terminal dashboard
+synapse onboard              # interactive setup wizard
+synapse onboard --flow quickstart    # minimal setup only
+synapse onboard --install-daemon     # setup + systemd service
+synapse configure            # re-run wizard sections
+synapse doctor               # health check
+synapse doctor --json        # health check as JSON
+synapse plugins              # list discovered plugins
+synapse service install      # install systemd user service
+synapse service status       # check service status
+synapse service uninstall    # remove systemd service
+```
+
+## Telegram slash commands
+
+These are processed deterministically (no LLM call):
+
+| Command | What it does |
+|---------|-------------|
+| `/skills` | List all loaded skills |
+| `/memory` | Show current memory (all scopes) |
+| `/clear` | Clear session memory |
+| `/health` | Runtime health check |
+| `/usage` | Token and cost summary |
+| `/reload-skills` | Trigger skill hot reload |
+| `/jobs` | List recent background jobs |

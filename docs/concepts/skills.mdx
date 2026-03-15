@@ -1,0 +1,124 @@
+---
+title: "Skills"
+description: "Drop a SKILL.md and the agent can use it. No code changes."
+---
+
+## What a skill is
+
+A skill is a directory under `skills/` with two required files:
+
+```
+skills/my-skill/
+  manifest.json    ← metadata, tools, dependencies
+  SKILL.md         ← full documentation the LLM loads on demand
+  scripts/         ← optional scripts the skill runs
+  references/      ← optional reference files
+  watchlists/      ← optional data files
+```
+
+The agent has a compact index of all loaded skills in its system prompt. When it needs a skill, it calls `load_skill("my-skill")` to get the full `SKILL.md`. This is **progressive disclosure** — the system prompt stays small, full docs load on demand.
+
+## manifest.json
+
+```json
+{
+  "id": "my-skill",
+  "name": "My Skill",
+  "description": "Short description shown in the compact index",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "my_tool",
+      "description": "Does something useful",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "param": { "type": "string", "description": "The param" }
+        },
+        "required": ["param"]
+      },
+      "command": "python scripts/my_tool.py {param}"
+    }
+  ]
+}
+```
+
+Manifest-declared `tools` are auto-registered in `ToolRegistry` at boot. No code changes.
+
+## SKILL.md frontmatter
+
+Synapse parses OpenClaw-style YAML frontmatter from `SKILL.md`:
+
+```markdown
+---
+metadata:
+  category: finance
+  requires_bins: [python3, ta-lib]
+  python: [tradingview_ta, pandas]
+  references: [watchlists/nifty500.csv]
+---
+
+# My Skill
+
+Full documentation the LLM will load...
+```
+
+Parsed metadata feeds into: skill selection, dependency bootstrap, execution policy.
+
+## Hot reload
+
+Skills directory is watched via mtime polling. Changes take effect without restarting the process:
+
+- **Add** a skill directory → tools registered for new runs immediately
+- **Edit** `manifest.json` or `SKILL.md` → skill reloaded, tools updated
+- **Remove** a directory → tools unregistered
+
+Active runs keep their tool snapshot from when they started — reloads only affect new runs.
+
+Manual trigger:
+
+```bash
+curl -X POST http://localhost:8000/api/skills/reload
+```
+
+## Installing skill packages
+
+Install a skill from a zip bundle or directory:
+
+```bash
+# Via API
+curl -X POST http://localhost:8000/api/skills/install \
+  -F "source=@my-skill.zip"
+```
+
+The installer:
+1. Stages to `var/skills/staging/<id>/`
+2. Validates structure (requires `manifest.json` + `SKILL.md`)
+3. Atomically promotes to `skills/`
+4. Writes provenance to `var/skills/registry/<id>.json`
+5. Triggers hot reload
+
+Invalid bundles never touch the live `skills/` tree.
+
+## Execution
+
+Skills with shell commands execute via `shell_exec` or manifest tool commands. Execution policy:
+
+| Mode | When |
+|------|------|
+| Host | Default — runs in the current process env |
+| Per-skill venv | When skill declares Python deps and `SKILL_AUTO_INSTALL_DEPS=1` |
+| Docker sandbox | When `EXECUTION_ISOLATED_ENABLED=1` |
+
+## Bundled skills
+
+| Skill | What it does |
+|-------|-------------|
+| `gws-gmail` | Gmail via the `gws` CLI |
+| `gws-calendar` | Google Calendar |
+| `gws-drive` | Google Drive |
+| `gws-docs` | Google Docs |
+| `gws-sheets` | Google Sheets |
+| `swing-trader` | Nifty stock pattern scanner + single-stock TA |
+| `codex` | Proposal-only code generation workflow |
+| `assistant` | General assistant persona and memory guidance |

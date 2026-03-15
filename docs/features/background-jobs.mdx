@@ -1,0 +1,75 @@
+---
+title: "Background Jobs"
+description: "Run long tasks in the background. Get notified when done."
+---
+
+## What it is
+
+Background jobs let the agent hand off a long-running tool call to a background thread, reply immediately with a job ID, and deliver the result when it's done — without keeping the Gateway run active.
+
+Good for: test runs, proposal generation, long shell commands, Docker-heavy tasks.
+
+## How to use it
+
+Just ask:
+
+> _"Run the test suite in the background"_
+> _"Generate a proposal for X — run it in the background"_
+
+Or explicitly set `background: true` in tool params. Supported by: `shell_exec`, `codex_propose`, `codex_run_tests`.
+
+## What happens
+
+```
+You: run tests in background
+Synapse: started job job_abc123 — I'll message you when it's done
+
+[... 2 minutes later, direct message ...]
+Synapse: job_abc123 done ✓
+440 passed, 0 failed (2m 13s)
+Artifacts: var/jobs/job_abc123/output.txt
+```
+
+## Job states
+
+```
+QUEUED → RUNNING → DONE
+                → FAILED
+                → CANCELLED
+```
+
+## API
+
+```bash
+# Start a job (usually done via tool call)
+POST /api/jobs
+{
+  "tool": "shell_exec",
+  "params": { "command": "pytest -q", "background": true },
+  "session_key": "..."
+}
+
+# Check status
+GET /api/jobs/{job_id}
+
+# Cancel
+POST /api/jobs/{job_id}/cancel
+```
+
+## Artifacts
+
+Each job gets a directory: `var/jobs/<job_id>/`
+
+Output, logs, and any generated files are written there and referenced in the completion message.
+
+## Concurrency
+
+Default: 1 concurrent job. Configure:
+
+```bash
+JOB_MAX_CONCURRENCY=3
+```
+
+## Startup recovery
+
+On process restart, any jobs that were in `RUNNING` state are marked `FAILED` with a note that the process restarted. Queued jobs are not automatically retried.

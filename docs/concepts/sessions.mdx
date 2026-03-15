@@ -1,0 +1,39 @@
+---
+title: "Sessions"
+description: "How Synapse tracks conversations and serializes runs."
+---
+
+## Session key
+
+Every conversation maps to a session key — derived from the channel, chat ID, and user ID. All messages in the same Telegram chat share a session.
+
+## Session lane
+
+One active run per session at a time. If a new message arrives while a run is in progress, it queues and processes after the current run completes. This prevents race conditions and keeps the transcript coherent.
+
+## Run record
+
+Each inbound message creates a `RunRecord` in SQLite with:
+- `run_id` — unique UUID
+- `session_key` — conversation identifier
+- `user_id` — sender
+- `state` — PENDING → RUNNING → DONE / FAILED
+- Events appended as the run progresses
+
+## Transcript
+
+The last N messages in a session are included as actual conversation history (not just a summary) in the system prompt for each turn. This gives the LLM accurate context of what was said.
+
+## Session memory
+
+Session-scoped memory (`var/memory/session/<key>.md`) is included in every turn for that session. It's the agent's working scratchpad for the current conversation.
+
+## Session state machine
+
+States:
+
+```
+PENDING → RUNNING → DONE
+                 → FAILED
+                 → WAITING_APPROVAL  (paused, waiting for user)
+```

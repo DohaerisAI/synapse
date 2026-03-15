@@ -1,0 +1,75 @@
+---
+title: "Synapse"
+description: "A self-hosted agent runtime that knows what it is, knows what it can't do, and gets better."
+---
+
+<img src="/assets/logo.png" alt="Synapse" width="160" />
+
+# Synapse
+
+**A first-principles agent runtime. Self-aware. Plug-and-play skills. Human in control.**
+
+Message it on Telegram. It calls tools, loads skills on demand, remembers context, and tells you exactly what it can't do yet.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/get-started/quickstart" icon="rocket">
+    Install and run your first conversation in 3 commands.
+  </Card>
+  <Card title="Run the wizard" href="/get-started/onboarding" icon="wand-magic-sparkles">
+    `synapse onboard` — guided setup for LLM, Telegram, GWS, and MCP.
+  </Card>
+  <Card title="Architecture" href="/concepts/architecture" icon="diagram-project">
+    ReAct loop, operator layer, tool registry, and gateway explained.
+  </Card>
+  <Card title="Skills" href="/concepts/skills" icon="bolt">
+    Drop a SKILL.md and restart. Or use hot reload — no restart needed.
+  </Card>
+</CardGroup>
+
+## What is Synapse?
+
+Synapse is a **self-hosted agent runtime** that connects Telegram (and a terminal REPL) to an LLM via a ReAct loop with native tool calling. You run a single server process on your own machine — it becomes your personal AI assistant you can message from anywhere.
+
+**What makes it different:**
+
+- **Self-aware** — carries a typed model of itself, knows its own capabilities and gaps
+- **Plug-and-play skills** — drop a `SKILL.md`, the agent picks it up. Hot reload = no restart.
+- **One loop, no pipeline** — no intent classification, no multi-stage workflow. The LLM decides what to call.
+- **Approval at the tool level** — `gmail search` is free. `gmail send` needs your OK. Per-tool, durable allowlist.
+- **Proposes its own improvements** — diagnosis engine finds gaps, suggests new skills
+
+## How it works
+
+```
+Telegram / Terminal
+       │
+ [ Channel Adapter ]
+       │
+   [ Gateway ]
+       │
+  [ Operator Layer ]   ← policy, grounding, defaults
+       │
+  [ ReAct Loop ]       ← LLM + tools, multi-turn
+       │
+  ┌────┼────┐
+Builtins Skills MCP
+  memory  gws   kite
+  shell  swing  ...
+  fs/repo codex
+       │
+  [ SQLite + Memory ]
+  runs, jobs, usage
+  approvals, proposals
+```
+
+## Quick start
+
+```bash
+git clone https://github.com/DohaerisAI/synapse.git
+cd synapse
+python3 -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/python -m synapse onboard
+.venv/bin/python -m synapse serve
+```
+
+See [Quickstart](/get-started/quickstart) for the full walkthrough.

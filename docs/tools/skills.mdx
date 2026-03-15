@@ -1,0 +1,74 @@
+---
+title: "Skills System"
+description: "How skills are loaded, hot-reloaded, and installed."
+---
+
+See [Concepts → Skills](/concepts/skills) for the full architecture.
+
+## Quick reference
+
+### Add a skill
+
+```bash
+mkdir skills/my-skill
+# add manifest.json + SKILL.md
+# skills auto-reload — no restart needed
+```
+
+### Install from zip
+
+```bash
+curl -X POST http://localhost:8000/api/skills/install \
+  -F "source=@my-skill.zip"
+```
+
+### Manual reload
+
+```bash
+curl -X POST http://localhost:8000/api/skills/reload
+# or in Telegram:
+/reload-skills
+```
+
+### List loaded skills
+
+```bash
+curl http://localhost:8000/api/skills
+# or in Telegram:
+/skills
+```
+
+## Skill manifest template
+
+```json
+{
+  "id": "my-skill",
+  "name": "My Skill",
+  "description": "What this skill does — shown in the compact index",
+  "version": "1.0.0",
+  "tools": []
+}
+```
+
+## SKILL.md template
+
+```markdown
+---
+metadata:
+  category: general
+  requires_bins: []
+  python: []
+---
+
+# My Skill
+
+What this skill does, in detail.
+
+## Usage
+
+How to invoke it, example commands, expected output.
+
+## Notes
+
+Limitations, edge cases, known issues.
+```

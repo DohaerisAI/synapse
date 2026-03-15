@@ -1,0 +1,120 @@
+---
+title: "Configuration"
+description: "All environment variables and config files."
+---
+
+Config loads in order: `.env` → `.env.local` → process environment. Later values override earlier ones.
+
+`synapse onboard` writes `.env.local` for you. Manual reference below.
+
+## LLM Provider
+
+```bash
+# Codex CLI (recommended)
+CODEX_MODEL=gpt-5.4
+CODEX_AUTH_FILE=~/.codex/auth.json
+CODEX_TRANSPORT=responses        # "responses" or "cli"
+
+# Azure OpenAI
+AZURE_OPENAI_ENDPOINT=https://myorg.openai.azure.com
+AZURE_OPENAI_API_KEY=sk-...
+AZURE_OPENAI_MODEL=gpt-5.2-chat
+AZURE_OPENAI_API_VERSION=2024-12-01-preview
+
+# OpenAI-compatible
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o
+```
+
+## Telegram
+
+```bash
+TELEGRAM_BOT_TOKEN=your-bot-token
+TELEGRAM_POLLING_ENABLED=1
+TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321   # restrict to specific chats
+```
+
+## Google Workspace
+
+```bash
+GWS_ENABLED=1
+GWS_ALLOWED_SERVICES=gmail,calendar,drive,docs,sheets
+```
+
+## Server
+
+```bash
+SERVER_HOST=127.0.0.1
+SERVER_PORT=8000
+```
+
+## Memory
+
+```bash
+MEMORY_ROOT=var/memory            # where markdown memory files live
+WORKSPACE_ROOT=.                  # workspace root for SELF.md, USER.md, etc.
+```
+
+## Heartbeat
+
+```bash
+HEARTBEAT_ENABLED=1
+HEARTBEAT_EVERY_MINUTES=10
+HEARTBEAT_ACTIVE_HOURS_START=9   # 9am
+HEARTBEAT_ACTIVE_HOURS_END=22    # 10pm
+```
+
+## Background Jobs
+
+```bash
+JOB_MAX_CONCURRENCY=1            # max parallel background jobs
+```
+
+## Execution Sandbox
+
+```bash
+EXECUTION_ISOLATED_ENABLED=0           # enable Docker sandbox (default off)
+EXECUTION_DOCKER_IMAGE=python:3.12-slim
+EXECUTION_DOCKER_ALLOW_NETWORK=0
+EXECUTION_DOCKER_MOUNT_WORKSPACE=0
+EXECUTION_TIMEOUT_SECONDS=60
+EXECUTION_MAX_OUTPUT_BYTES=65536
+SKILL_AUTO_INSTALL_DEPS=0              # auto-install skill Python deps
+```
+
+## Usage Tracking
+
+```bash
+PRICING_JSON=/path/to/pricing.json    # custom pricing override
+```
+
+## NL Router (advanced)
+
+```bash
+# Gates the experimental NL live-analysis router. Default off.
+EXECUTION_ENABLE_LIVE_ANALYZE_NL_ROUTER=0
+```
+
+## MCP (`mcp.yaml`)
+
+MCP connections live in `mcp.yaml` (gitignored):
+
+```yaml
+enabled: true
+connections:
+  - server_id: kite
+    url: "https://mcp.kite.trade/mcp"
+    auth:
+      auth_type: oauth
+      token: "your-kite-token"
+    enabled: true
+
+  - server_id: upstox
+    url: "https://mcp.upstox.com/mcp"
+    transport: stdio
+    command: "npx mcp-remote"
+    auth:
+      auth_type: oauth
+    enabled: false
+```
