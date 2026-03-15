@@ -70,6 +70,8 @@ class MCPConnectionConfig(BaseModel):
     auth: MCPAuthConfig = Field(default_factory=MCPAuthConfig)
     enabled: bool = True
     rate_limit: int = 60
+    transport: str = "http"  # "http" or "stdio"
+    command: str = ""  # subprocess command for stdio, e.g. "npx mcp-remote"
 
 
 class MCPConfig(BaseModel):

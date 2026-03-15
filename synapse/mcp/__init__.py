@@ -9,7 +9,12 @@ from .types import (
     MCPToolResult,
 )
 
+from .transport import HttpMcpTransport
+from .stdio_transport import StdioMcpTransport
+
 __all__ = [
+    "HttpMcpTransport",
+    "StdioMcpTransport",
     "MCPAuth",
     "MCPConnectionInfo",
     "MCPConnectionStatus",

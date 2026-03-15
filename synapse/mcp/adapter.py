@@ -40,7 +40,12 @@ class MCPAdapter:
         """Connect to the MCP server and perform initialization handshake."""
         if self._transport is None:
             raise RuntimeError(f"no transport configured for MCP server {self.server_id}")
-        await self._transport.send("initialize")
+        # Use transport's initialize() if available (handles full handshake),
+        # otherwise fall back to raw send
+        if hasattr(self._transport, "initialize"):
+            await self._transport.initialize()
+        else:
+            await self._transport.send("initialize")
         self._connected = True
         logger.info("MCP adapter connected: %s (%s)", self.server_id, self.url)
 

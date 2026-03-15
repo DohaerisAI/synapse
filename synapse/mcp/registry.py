@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
-from ..capabilities import CapabilityDefinition
 from .types import MCPConnectionInfo, MCPConnectionStatus, MCPToolDefinition
 
 logger = logging.getLogger(__name__)
@@ -95,17 +94,6 @@ class MCPRegistry:
                 self._tools[tool.name] = (adapter, tool)
         return all_tools
 
-    def capabilities_from_tools(self) -> list[CapabilityDefinition]:
-        """Generate CapabilityDefinition entries from discovered MCP tools.
-
-        Convention: action = "mcp.{server_id}.{tool_name}"
-                    family = "mcp.{server_id}"
-        """
-        caps: list[CapabilityDefinition] = []
-        for tool_name, (adapter, tool) in self._tools.items():
-            caps.append(CapabilityDefinition(
-                action=f"mcp.{adapter.server_id}.{tool_name}",
-                family=f"mcp.{adapter.server_id}",
-                description=tool.description,
-            ))
-        return caps
+    def tool_names(self) -> list[str]:
+        """Return all registered tool names."""
+        return list(self._tools.keys())
