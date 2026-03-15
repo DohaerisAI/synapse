@@ -146,14 +146,16 @@ def detect_nr7(d: dict) -> dict | None:
 
 
 def detect_volume_dryup(d: dict) -> dict | None:
-    """Detect 3+ days of declining volume."""
+    """Detect 3+ days of declining volume into the most recent day.
+
+    We look for volume[3] > volume[2] > volume[1] (declining towards today),
+    with an optional breakout spike today (volume > 1.3 * volume[1]).
+    """
     try:
         vols = [d[f"volume[{i}]"] if i > 0 else d["volume"] for i in range(4)]
-        # Check compression days (days 1,2,3) have declining volume
-        if vols[1] < vols[2] and vols[2] < vols[3]:
-            # Today's (breakout) volume should be higher than yesterday
+        # Declining volume into the most recent completed day (1)
+        if vols[3] > vols[2] > vols[1]:
             breakout_vol_spike = vols[0] > vols[1] * 1.3
-            # Find consolidation low
             lows = [d[f"low[{i}]"] for i in range(1, 4)]
             consol_low = min(lows)
             return {
@@ -223,10 +225,10 @@ def apply_filters(d: dict) -> dict:
 
 
 def calc_rr(entry: float, sl: float, d: dict) -> dict:
-    """Calculate risk-reward using pivot targets."""
+    """Calculate risk-reward using pivot targets + fixed R-multiples."""
     risk = abs(entry - sl)
     if risk == 0:
-        return {"risk": 0, "targets": []}
+        return {"risk": 0, "targets": [], "best_rr": 0}
     targets = []
     for key in ["Pivot.M.Classic.R1", "Pivot.M.Classic.R2"]:
         val = d.get(key)
@@ -237,18 +239,71 @@ def calc_rr(entry: float, sl: float, d: dict) -> dict:
                 "price": round(val, 2),
                 "rr": round(reward / risk, 1),
             })
-    # Always add 2R and 3R targets
     targets.append({"level": "2R", "price": round(entry + 2 * risk, 2), "rr": 2.0})
     targets.append({"level": "3R", "price": round(entry + 3 * risk, 2), "rr": 3.0})
+    best_rr = max((t.get("rr", 0) or 0) for t in targets) if targets else 0
     return {
         "risk_per_share": round(risk, 2),
         "risk_pct": round(risk / entry * 100, 1),
         "targets": targets,
+        "best_rr": float(best_rr),
     }
 
 
-def scan(pattern: str, watchlist: str = "nifty50") -> dict:
-    """Scan watchlist for swing setups."""
+def _score_setup(hit: dict, filters: dict, rr: dict) -> dict:
+    """Compute a simple score to rank watch candidates."""
+    score = 0.0
+    reasons: list[str] = []
+
+    # Trend alignment
+    if filters.get("above_ema20"):
+        score += 1.0
+    else:
+        reasons.append("below_ema20")
+    if filters.get("above_ema50"):
+        score += 0.8
+    if filters.get("above_ema200"):
+        score += 0.8
+    if filters.get("emas_stacked"):
+        score += 1.0
+
+    # Momentum
+    rsi = filters.get("rsi")
+    if isinstance(rsi, (int, float)):
+        if 45 <= rsi <= 65:
+            score += 1.0
+        elif 40 <= rsi < 45:
+            score += 0.5
+        else:
+            reasons.append("rsi_out_of_band")
+
+    # Pattern quality
+    pat = hit.get("pattern")
+    if pat == "inside_candle":
+        if hit.get("volume_compression"):
+            score += 0.7
+    if pat == "volume_dryup":
+        if hit.get("breakout_volume_spike"):
+            score += 0.7
+
+    # Reward
+    best_rr = rr.get("best_rr", 0)
+    try:
+        best_rr_f = float(best_rr)
+    except Exception:
+        best_rr_f = 0.0
+    score += min(2.0, max(0.0, best_rr_f) / 2.0)  # cap contribution
+
+    return {"score": round(score, 2), "score_notes": reasons or None}
+
+
+def scan(pattern: str, watchlist: str = "nifty50", *, mode: str = "trade_ready", top: int | None = None) -> dict:
+    """Scan watchlist for swing setups.
+
+    mode:
+      - trade_ready: only setups passing strict filters
+      - near_setups: include pattern hits even if filters fail, with reasons
+    """
     symbols = load_watchlist(watchlist)
     if not symbols:
         return {"error": f"Watchlist '{watchlist}' not found or empty"}
@@ -270,6 +325,7 @@ def scan(pattern: str, watchlist: str = "nifty50") -> dict:
     else:
         return {"error": f"Unknown pattern: {pattern}. Options: all, inside_candle, nr7, volume_dryup, engulfing"}
 
+    mode = mode or "trade_ready"
     results = []
     for symbol, d in data.items():
         for pat_name, detector in active_detectors.items():
@@ -277,18 +333,23 @@ def scan(pattern: str, watchlist: str = "nifty50") -> dict:
             if hit is None:
                 continue
             filters = apply_filters(d)
-            if not filters["pass"]:
+            trade_ready = bool(filters.get("pass"))
+            if mode == "trade_ready" and not trade_ready:
                 continue
+
             rr = calc_rr(hit["entry_trigger"], hit["sl"], d)
-            # Skip if best R:R < 1.5
-            if rr.get("targets") and all(t["rr"] < 1.5 for t in rr["targets"][:2]):
+            # Skip if best R:R < 1.5 in trade_ready mode
+            if mode == "trade_ready" and rr.get("best_rr", 0) < 1.5:
                 continue
+
             # Check for combo patterns
             combo = []
             if pat_name == "inside_candle" and detect_nr7(d):
                 combo.append("nr7")
             if pat_name == "nr7" and detect_inside_candle(d):
                 combo.append("inside_candle")
+
+            score = _score_setup(hit, filters, rr)
 
             results.append({
                 "symbol": symbol,
@@ -297,18 +358,26 @@ def scan(pattern: str, watchlist: str = "nifty50") -> dict:
                 **hit,
                 "combo": combo if combo else None,
                 "filters": filters,
+                "trade_ready": trade_ready,
                 "risk_reward": rr,
+                **score,
             })
 
-    # Sort: combos first, then by R:R
+    # Sort: trade_ready first, then combos, then score
     results.sort(key=lambda x: (
+        0 if x.get("trade_ready") else 1,
         -len(x.get("combo") or []),
-        -(x["risk_reward"]["targets"][0]["rr"] if x["risk_reward"].get("targets") else 0),
+        -(x.get("score") or 0),
     ))
+
+    if isinstance(top, int) and top > 0:
+        results = results[:top]
 
     return {
         "watchlist": watchlist,
         "pattern": pattern,
+        "mode": mode,
+        "top": top,
         "scanned": len(data),
         "setups_found": len(results),
         "setups": results,
@@ -427,6 +496,8 @@ def main():
     scan_p = sub.add_parser("scan", help="Scan watchlist for patterns")
     scan_p.add_argument("--pattern", required=True, choices=["all", "inside_candle", "nr7", "volume_dryup", "engulfing"])
     scan_p.add_argument("--watchlist", default="nifty50")
+    scan_p.add_argument("--mode", default="trade_ready", choices=["trade_ready", "near_setups"], help="Filter strictness")
+    scan_p.add_argument("--top", type=int, default=0, help="Return only top N results (0 = all)")
 
     analyze_p = sub.add_parser("analyze", help="Analyze a single stock")
     analyze_p.add_argument("--symbol", required=True)
@@ -443,7 +514,8 @@ def main():
     args = parser.parse_args()
 
     if args.command == "scan":
-        result = scan(args.pattern, args.watchlist)
+        top = args.top if args.top and args.top > 0 else None
+        result = scan(args.pattern, args.watchlist, mode=args.mode, top=top)
     elif args.command == "analyze":
         result = analyze(args.symbol, args.timeframe)
     elif args.command == "size":
