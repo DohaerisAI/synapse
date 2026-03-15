@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import logging
 import os
 import threading
 import time
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from .mcp.stdio_transport import StdioMcpTransport
 from .mcp.transport import HttpMcpTransport
 from .mcp.types import MCPAuth
 from .introspection import RuntimeIntrospector
+from .jobs import JobArtifacts, JobService
 from .plugins import PluginRegistry, discover_plugins, load_all as load_all_plugins
 from .gateway import Gateway
 from .tools.registry import ToolDef, ToolRegistry, ToolResult
@@ -38,10 +40,11 @@ from .gws import DEFAULT_GWS_ALLOWED_SERVICES, GWSBridge
 from .identifiers import derive_session_key
 from .integrations import IntegrationRegistry
 from .memory import MemoryStore
-from .models import ApprovalStatus, DeliveryTarget, HeartbeatStatus, InputStatus, NormalizedInboundEvent, ReminderStatus, RunState, utc_now
+from .models import ApprovalStatus, DeliveryTarget, HeartbeatStatus, InputStatus, JobRecord, JobStatus, NormalizedInboundEvent, ReminderStatus, RunState, utc_now
 from .providers import ModelRouter
 from .session import SessionStateMachine
-from .skills import SkillRegistry
+from .skill_runtime import CommandRunner
+from .skills import SkillHotReloader, SkillRegistry, install_skill_bundle
 from .store import SQLiteStore
 from .workspace import WorkspaceStore
 
@@ -64,6 +67,8 @@ class Runtime:
     env: dict[str, str]
     mcp_registry: MCPRegistry | None = None
     diagnosis_engine: DiagnosisEngine | None = None
+    introspector: RuntimeIntrospector | None = None
+    job_service: JobService | None = None
     background_services_owned: bool = False
     background_services_started: bool = False
     background_services_note: str | None = None
@@ -77,6 +82,11 @@ class Runtime:
     heartbeat_next_due_at: str | None = None
     _heartbeat_thread: threading.Thread | None = None
     _heartbeat_stop_event: threading.Event | None = None
+    # Anti-spam: track last delivered heartbeat message digest in-memory.
+    _heartbeat_last_digest: str | None = None
+    _heartbeat_last_delivered_at: str | None = None
+    _skill_reload_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    _skill_hot_reloader: SkillHotReloader | None = None
 
     def initialize(self) -> None:
         self.config.paths.data_dir.mkdir(parents=True, exist_ok=True)
@@ -86,13 +96,74 @@ class Runtime:
         self.integrations.initialize()
         self.skills.load()
         self.integrations.activate_existing()
-        self.skills.load()
+        self.reload_skills()
+        self._configure_telegram_commands()
+        self._start_skill_hot_reloader()
         telegram_status = self.telegram.status_snapshot()
         self.store.upsert_adapter_health(
             adapter="telegram",
             status=telegram_status["status"],
             auth_required=self.telegram.token is None,
         )
+
+    def shutdown(self) -> None:
+        self.stop_background_services()
+        self._stop_skill_hot_reloader()
+
+    def _configure_telegram_commands(self) -> None:
+        """Register a small curated Telegram command menu."""
+        try:
+            commands = [
+                {"command": "help", "description": "Show help"},
+                {"command": "usage", "description": "Usage / tokens / cost summary"},
+                {"command": "memory", "description": "Show memory"},
+                {"command": "skills", "description": "List skills"},
+                {"command": "search", "description": "Web search"},
+                {"command": "shell", "description": "Run a command"},
+                {"command": "jobs", "description": "Background jobs"},
+                {"command": "gws", "description": "Google Workspace"},
+            ]
+            self.telegram.set_commands(commands)
+        except Exception:
+            pass
+
+    def reload_skills(self) -> dict[str, object]:
+        with self._skill_reload_lock:
+            skills = self.skills.load()
+            _register_manifest_skill_tools(
+                self.gateway.tool_registry,
+                self.skills,
+                self.mcp_registry,
+            )
+            tool_names: list[str] = []
+            if self.gateway.tool_registry is not None:
+                tool_names = sorted(
+                    tool.name
+                    for tool in self.gateway.tool_registry.all_tools()
+                    if tool.name.startswith("skill.")
+                )
+            snapshot = {
+                "skills": sorted(skills),
+                "skill_count": len(skills),
+                "tools": tool_names,
+                "tool_count": len(tool_names),
+            }
+        logger.info(
+            "skills reloaded: %d skills, %d manifest tools",
+            snapshot["skill_count"],
+            snapshot["tool_count"],
+        )
+        return snapshot
+
+    def install_skill(self, source_path: str) -> dict[str, object]:
+        with self._skill_reload_lock:
+            summary = install_skill_bundle(
+                root=self.config.paths.root,
+                skills_dir=self.config.paths.skills_dir,
+                source_path=source_path,
+            )
+            summary["reload"] = self.reload_skills()
+            return summary
 
     def start_background_services(self) -> None:
         if self.background_services_started:
@@ -107,6 +178,8 @@ class Runtime:
             health_handler=self.store.upsert_adapter_health,
         )
         self.telegram.start()
+        if self.job_service is not None:
+            self.job_service.start()
         self.background_services_owned = True
         self.background_services_started = True
         self.background_services_note = None
@@ -117,6 +190,8 @@ class Runtime:
             self.background_services_started = False
             return
         self._stop_heartbeat_scheduler()
+        if self.job_service is not None:
+            self.job_service.stop()
         self._disconnect_mcp_servers()
         self.telegram.stop()
         self._reset_transient_state(reason="shutdown")
@@ -173,10 +248,145 @@ class Runtime:
     def deliver_result(self, result) -> None:
         if result.queued or not result.reply_text or getattr(result, "suppress_delivery", False):
             return
-        run = self.store.get_run(result.run_id)
-        if run is None:
+        delivery_target = getattr(result, "delivery_target", None)
+        if delivery_target is None:
+            run = self.store.get_run(result.run_id)
+            if run is None:
+                return
+            delivery_target = DeliveryTarget(
+                adapter=run.adapter,
+                channel_id=run.channel_id,
+                user_id=run.user_id,
+                message_id=getattr(result, "in_reply_to_message_id", None),
+            )
+        self._send_direct(
+            delivery_target.adapter,
+            delivery_target.channel_id,
+            result.reply_text,
+            raise_on_unavailable=False,
+        )
+
+        # Best-effort lightweight reactions on Telegram.
+        # This is intentionally subtle (like OpenClaw): only for acknowledgements.
+        if delivery_target.adapter == "telegram":
+            msg_id = getattr(delivery_target, "message_id", None)
+            if msg_id is None:
+                msg_id = getattr(result, "in_reply_to_message_id", None)
+            if msg_id is not None and isinstance(msg_id, str) and msg_id.isdigit():
+                if any(result.reply_text.lower().startswith(p) for p in ("done", "fixed", "cool", "ok", "okay", "got it", "on it")):
+                    try:
+                        self.telegram.set_reaction(delivery_target.channel_id, int(msg_id), "👍")
+                    except Exception:
+                        pass
+
+    async def execute_job_tool(
+        self,
+        job: JobRecord,
+        artifacts: JobArtifacts,
+        cancel_event: threading.Event,
+    ) -> ToolResult:
+        if self.gateway.tool_registry is None:
+            return ToolResult(output="", error="tool registry not configured")
+        tool = self.gateway.tool_registry.get(job.tool_name)
+        if tool is None:
+            return ToolResult(output="", error=f"unknown tool: {job.tool_name}")
+        delivery_target = None
+        if (
+            job.delivery_target_adapter
+            and job.delivery_target_channel_id
+            and job.delivery_target_user_id
+        ):
+            delivery_target = DeliveryTarget(
+                adapter=job.delivery_target_adapter,
+                channel_id=job.delivery_target_channel_id,
+                user_id=job.delivery_target_user_id,
+            )
+        tool_context = self.gateway._build_tool_context(
+            None if job.parent_run_id is None else self.store.get_run(job.parent_run_id),
+            approval_id=job.approval_id,
+            override_session_key=job.session_key,
+            override_user_id=job.delivery_target_user_id,
+            override_delivery_target=delivery_target,
+            job_id=job.job_id,
+            cancel_event=cancel_event,
+            stdout_path=str(artifacts.stdout_path),
+            stderr_path=str(artifacts.stderr_path),
+        )
+        params = dict(job.params)
+        params.pop("background", None)
+        return await tool.execute(params, ctx=tool_context)
+
+    def handle_job_terminal(
+        self,
+        job: JobRecord,
+        result: ToolResult | None,
+        artifacts: JobArtifacts,
+    ) -> None:
+        follow_up = self._job_follow_up_text(job, artifacts)
+        event_type = {
+            JobStatus.SUCCEEDED: "job.completed",
+            JobStatus.FAILED: "job.failed",
+            JobStatus.CANCELLED: "job.cancelled",
+        }.get(job.status)
+        if event_type is not None and job.parent_run_id and job.session_key:
+            self.store.append_run_event(
+                job.parent_run_id,
+                job.session_key,
+                event_type,
+                {
+                    "job_id": job.job_id,
+                    "tool_name": job.tool_name,
+                    "status": job.status.value,
+                    "result_summary": job.result_summary,
+                    "error": job.error,
+                    "artifact_root": job.artifact_root,
+                },
+            )
+        if job.session_key and follow_up:
+            self.memory.append_transcript(
+                job.session_key,
+                {
+                    "role": "assistant",
+                    "content": follow_up,
+                    "kind": "job_follow_up",
+                    "job_id": job.job_id,
+                },
+            )
+        delivery_target = None
+        if (
+            job.delivery_target_adapter
+            and job.delivery_target_channel_id
+            and job.delivery_target_user_id
+        ):
+            delivery_target = DeliveryTarget(
+                adapter=job.delivery_target_adapter,
+                channel_id=job.delivery_target_channel_id,
+                user_id=job.delivery_target_user_id,
+            )
+        if delivery_target is None or not follow_up:
             return
-        self._send_direct(run.adapter, run.channel_id, result.reply_text, raise_on_unavailable=False)
+        self.deliver_result(
+            type("JobGatewayResult", (), {
+                "queued": False,
+                "reply_text": follow_up,
+                "suppress_delivery": False,
+                "delivery_target": delivery_target,
+                "run_id": job.parent_run_id or job.job_id,
+            })()
+        )
+
+    def _job_follow_up_text(self, job: JobRecord, artifacts: JobArtifacts) -> str:
+        if job.status == JobStatus.SUCCEEDED:
+            summary = job.result_summary or "Background job completed."
+            return (
+                f"Background job `{job.job_id}` completed for `{job.tool_name}`.\n"
+                f"{summary}\n"
+                f"Artifacts: {artifacts.summary_path}"
+            )
+        if job.status == JobStatus.CANCELLED:
+            return f"Background job `{job.job_id}` was cancelled."
+        detail = job.error or job.result_summary or "Background job failed."
+        return f"Background job `{job.job_id}` failed for `{job.tool_name}`.\n{detail}"
 
     def tui_snapshot(self) -> dict[str, object]:
         return {
@@ -247,9 +457,26 @@ class Runtime:
                 suppress_delivery = True
             elif self.heartbeat_ack_mode == "silent_ok" and reply_text == "HEARTBEAT_OK":
                 suppress_delivery = True
-            result.suppress_delivery = suppress_delivery
+
+            # Truncate before dedupe so we compare what the user would see.
             if len(result.reply_text) > self.heartbeat_max_chars:
                 result.reply_text = result.reply_text[: max(0, self.heartbeat_max_chars - 12)].rstrip() + " [truncated]"
+                reply_text = result.reply_text.strip()
+
+            # Dedupe: if the heartbeat output is identical to the last delivered heartbeat,
+            # suppress delivery to avoid spam.
+            if not suppress_delivery and reply_text:
+                digest = hashlib.sha256(reply_text.encode("utf-8")).hexdigest()
+                last_digest = self._heartbeat_last_digest or self.store.get_heartbeat_last_digest()
+                if digest == last_digest:
+                    suppress_delivery = True
+                else:
+                    self._heartbeat_last_digest = digest
+                    delivered_at = utc_now().isoformat()
+                    self._heartbeat_last_delivered_at = delivered_at
+                    self.store.set_heartbeat_last_digest(digest, delivered_at=delivered_at)
+
+            result.suppress_delivery = suppress_delivery
             self.deliver_result(result)
             self.store.update_heartbeat(
                 heartbeat.heartbeat_id,
@@ -425,6 +652,21 @@ class Runtime:
         handle.close()
         self._service_lock_handle = None
 
+    def _start_skill_hot_reloader(self) -> None:
+        reloader = self._skill_hot_reloader
+        if reloader is None:
+            reloader = SkillHotReloader(
+                self.config.paths.skills_dir,
+                reload_callback=self.reload_skills,
+            )
+            self._skill_hot_reloader = reloader
+        reloader.start()
+
+    def _stop_skill_hot_reloader(self) -> None:
+        reloader = self._skill_hot_reloader
+        if reloader is not None:
+            reloader.stop()
+
     def _start_heartbeat_scheduler(self) -> None:
         if self._heartbeat_thread is not None:
             if self.heartbeat_enabled and self.heartbeat_next_due_at is None:
@@ -572,7 +814,7 @@ def build_runtime(root: Path | None = None) -> Runtime:
     )
     store = SQLiteStore(config.paths.sqlite_path)
     hooks = HookRunner()
-    model_router = ModelRouter(auth, workdir=str(config.paths.root))
+    model_router = ModelRouter(auth, workdir=str(config.paths.root), store=store)
     allowed_services = {
         item.strip().lower()
         for item in config.gws.allowed_services.split(",")
@@ -589,6 +831,7 @@ def build_runtime(root: Path | None = None) -> Runtime:
         token=config.telegram.bot_token or None,
         polling_enabled=config.telegram.polling_enabled,
         poll_interval=config.telegram.poll_interval,
+        reactions_enabled=bool(getattr(config.telegram, "reactions_enabled", True)),
     )
     channel_registry = ChannelRegistry()
     channel_registry.register(TelegramPlugin.create(telegram))
@@ -609,41 +852,10 @@ def build_runtime(root: Path | None = None) -> Runtime:
         mcp_registry = MCPRegistry()
     # Build tool registry (ReAct loop path)
     tool_registry = ToolRegistry()
-    register_builtin_tools(tool_registry)
-    # Auto-register skill tools from manifests
-    for skill_id in skills.skills:
-        skill_tools = skills.get_skill_tools(skill_id)
-        if not skill_tools:
-            continue
-        for tool_spec in skill_tools:
-            mcp_ref = tool_spec.get("mcp", "")  # e.g. "kite.get_holdings"
-            if mcp_ref and mcp_registry is not None:
-                parts = mcp_ref.split(".", 1)
-                if len(parts) == 2:
-                    srv_id, mcp_tool_name = parts
-                    execute_fn = _make_lazy_mcp_tool_fn(mcp_registry, srv_id, mcp_tool_name)
-                    tool_registry.register(ToolDef(
-                        name=f"skill.{skill_id}.{tool_spec['name']}",
-                        description=tool_spec.get("description", ""),
-                        input_schema=tool_spec.get("parameters", {}),
-                        execute=execute_fn,
-                        needs_approval=_mcp_approval_policy(srv_id, mcp_tool_name),
-                        category=f"skill.{skill_id}",
-                    ))
-                    continue
-            # Non-MCP: register with a "load skill first" hint
-            _sid, _name = skill_id, tool_spec.get("name", "")
-            async def _skill_hint(params, *, ctx=None, sid=_sid, name=_name):
-                return ToolResult(output=f"Skill tool '{sid}.{name}' requires loading the skill first. Use load_skill.")
-            tool_registry.register(ToolDef(
-                name=f"skill.{skill_id}.{tool_spec['name']}",
-                description=tool_spec.get("description", ""),
-                input_schema=tool_spec.get("parameters", {}),
-                execute=_skill_hint,
-                category=f"skill.{skill_id}",
-            ))
+    register_builtin_tools(tool_registry, config=config)
     approval_path = config.paths.data_dir / "approvals.json"
     approval_manager = ApprovalManager(approval_path)
+    command_runner = CommandRunner(config=config, skill_registry=skills)
 
     gateway = Gateway(
         store=store,
@@ -661,8 +873,10 @@ def build_runtime(root: Path | None = None) -> Runtime:
             workdir=str(config.paths.root),
             introspector=introspector,
             diagnosis_engine=diagnosis_engine,
+            command_runner=command_runner,
+            pricing=config.pricing,
         ),
-        isolated_executor=IsolatedExecutor(),
+        isolated_executor=IsolatedExecutor(command_runner=command_runner),
         model_router=model_router,
         agent_name=config.agent.name,
         assistant_instructions=config.agent.extra_instructions,
@@ -671,7 +885,9 @@ def build_runtime(root: Path | None = None) -> Runtime:
         tool_registry=tool_registry,
         approval_manager=approval_manager,
         diagnosis_engine=diagnosis_engine,
+        command_runner=command_runner,
     )
+    gateway._config = config
     runtime = Runtime(
         config=config,
         store=store,
@@ -688,6 +904,7 @@ def build_runtime(root: Path | None = None) -> Runtime:
         workspace=workspace,
         mcp_registry=mcp_registry,
         diagnosis_engine=diagnosis_engine,
+        introspector=introspector,
         env=env,
         heartbeat_enabled=config.heartbeat.enabled,
         heartbeat_every_minutes=config.heartbeat.every_minutes,
@@ -697,4 +914,64 @@ def build_runtime(root: Path | None = None) -> Runtime:
         heartbeat_max_chars=config.heartbeat.max_chars,
     )
     runtime.initialize()
+    runtime.job_service = JobService(
+        store=store,
+        root=config.paths.root / "var" / "jobs",
+        execute_job=runtime.execute_job_tool,
+        on_terminal=runtime.handle_job_terminal,
+        concurrency=config.jobs.max_concurrency,
+    )
+    gateway._job_service = runtime.job_service
     return runtime
+
+
+def _register_manifest_skill_tools(
+    tool_registry: ToolRegistry | None,
+    skills: SkillRegistry,
+    mcp_registry: MCPRegistry | None,
+) -> None:
+    if tool_registry is None:
+        return
+    replacements: list[ToolDef] = []
+    for skill_id in skills.skills:
+        skill_tools = skills.get_skill_tools(skill_id)
+        if not skill_tools:
+            continue
+        for tool_spec in skill_tools:
+            mcp_ref = tool_spec.get("mcp", "")
+            if mcp_ref and mcp_registry is not None:
+                parts = mcp_ref.split(".", 1)
+                if len(parts) == 2:
+                    srv_id, mcp_tool_name = parts
+                    execute_fn = _make_lazy_mcp_tool_fn(mcp_registry, srv_id, mcp_tool_name)
+                    replacements.append(
+                        ToolDef(
+                            name=f"skill.{skill_id}.{tool_spec['name']}",
+                            description=tool_spec.get("description", ""),
+                            input_schema=tool_spec.get("parameters", {}),
+                            execute=execute_fn,
+                            needs_approval=_mcp_approval_policy(srv_id, mcp_tool_name),
+                            category=f"skill.{skill_id}",
+                        )
+                    )
+                    continue
+            _sid, _name = skill_id, tool_spec.get("name", "")
+
+            async def _skill_hint(params, *, ctx=None, sid=_sid, name=_name):
+                return ToolResult(
+                    output=f"Skill tool '{sid}.{name}' requires loading the skill first. Use load_skill."
+                )
+
+            replacements.append(
+                ToolDef(
+                    name=f"skill.{skill_id}.{tool_spec['name']}",
+                    description=tool_spec.get("description", ""),
+                    input_schema=tool_spec.get("parameters", {}),
+                    execute=_skill_hint,
+                    category=f"skill.{skill_id}",
+                )
+            )
+    tool_registry.replace_tools(
+        predicate=lambda tool: tool.name.startswith("skill."),
+        replacements=replacements,
+    )

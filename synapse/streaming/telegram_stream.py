@@ -67,14 +67,17 @@ class TelegramDraftStream:
         adapter: TelegramAdapter,
         chat_id: str,
         *,
-        throttle_ms: int = 1000,
-        min_initial_chars: int = 20,
+        throttle_ms: int = 600,
+        min_initial_chars: int = 5,
         prefer_draft: bool = True,
     ) -> None:
         self._adapter = adapter
         self._chat_id = chat_id
         self._parts: list[str] = []
+        # Permanent message id (message transport) OR final materialized message id.
         self._message_id: int | None = None
+        # Preview message id when sendMessageDraft unexpectedly returns a real message.
+        self._preview_message_id: int | None = None
         self._typing_sent: bool = False
         self._typing_task: asyncio.Task[None] | None = None
         self._stopped: bool = False
@@ -133,8 +136,8 @@ class TelegramDraftStream:
         await self.finalize()
 
         logger.info(
-            "materialize: transport=%s message_id=%s draft_sent=%s accumulated=%d",
-            self._transport, self._message_id, self._draft_sent,
+            "materialize: transport=%s message_id=%s preview_id=%s draft_sent=%s accumulated=%d",
+            self._transport, self._message_id, self._preview_message_id, self._draft_sent,
             len(self.accumulated_text),
         )
 
@@ -148,6 +151,7 @@ class TelegramDraftStream:
             return None
 
         logger.info("materialize: sending permanent message for draft transport")
+        final_id: int | None = None
         try:
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
@@ -157,11 +161,22 @@ class TelegramDraftStream:
             msg_id = result.get("message_id")
             if isinstance(msg_id, int):
                 self._message_id = msg_id
-                return msg_id
+                final_id = msg_id
         except Exception as exc:
             logger.warning("telegram draft materialize failed: %s", exc)
+            return None
 
-        return None
+        # If the draft call produced a real preview message, clean it up now.
+        if final_id is not None and self._preview_message_id is not None and self._preview_message_id != final_id:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, lambda: self._adapter.delete_message(self._chat_id, self._preview_message_id or 0),
+                )
+            except Exception:
+                pass
+
+        return final_id
 
     @property
     def accumulated_text(self) -> str:
@@ -242,14 +257,13 @@ class TelegramDraftStream:
         self._draft_sent = True
 
         # Some Telegram deployments may respond with a real message payload.
-        # If we see a message_id, treat this as message transport from now on
-        # to avoid materialize() sending a duplicate.
+        # If we see a message_id, treat it as a *preview* bubble. We'll delete it
+        # after we materialize the final message, so the UX matches OpenClaw.
         try:
             result = response.get("result", {}) if isinstance(response, dict) else {}
             msg_id = result.get("message_id")
             if isinstance(msg_id, int):
-                self._message_id = msg_id
-                self._transport = "message"
+                self._preview_message_id = msg_id
         except Exception:
             pass
 

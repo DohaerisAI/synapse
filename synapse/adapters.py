@@ -6,6 +6,7 @@ import threading
 import time
 from html import escape
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -13,6 +14,7 @@ from .attachments import enrich_attachment
 from .models import NormalizedInboundEvent
 
 logger = logging.getLogger(__name__)
+_OUTBOUND_PLACEHOLDER_RE = re.compile(r"@@([^@\n]+?)@@")
 
 
 def _split_text(text: str, *, max_len: int = 4096) -> list[str]:
@@ -55,11 +57,13 @@ class TelegramAdapter:
         *,
         polling_enabled: bool = False,
         poll_interval: float = 2.0,
+        reactions_enabled: bool = False,
     ) -> None:
         self.token = token
         self.client = client or httpx.Client(timeout=30.0)
         self.polling_enabled = polling_enabled
         self.poll_interval = poll_interval
+        self.reactions_enabled = reactions_enabled
         self.last_error: str | None = None
         self.update_offset: int | None = None
         self._inbound_handler: Any | None = None
@@ -101,36 +105,34 @@ class TelegramAdapter:
         last_response: dict[str, Any] = {}
         for chunk in chunks:
             rendered = self._render_telegram_html(chunk)
-            response = self.client.post(
-                f"https://api.telegram.org/bot{self.token}/sendMessage",
-                json={"chat_id": chat_id, "text": rendered, "parse_mode": "HTML"},
+            response = self._post_telegram(
+                "sendMessage",
+                {"chat_id": chat_id, "text": rendered, "parse_mode": "HTML"},
+                fallback_text=self._render_plain(chunk),
             )
-            response.raise_for_status()
-            last_response = response.json()
+            last_response = response
         return last_response
 
     def edit_text(self, chat_id: str, message_id: int, text: str) -> dict[str, Any]:
         if not self.token:
             raise RuntimeError("telegram bot token is not configured")
         rendered = self._render_telegram_html(text)
-        response = self.client.post(
-            f"https://api.telegram.org/bot{self.token}/editMessageText",
-            json={"chat_id": chat_id, "message_id": message_id, "text": rendered, "parse_mode": "HTML"},
+        return self._post_telegram(
+            "editMessageText",
+            {"chat_id": chat_id, "message_id": message_id, "text": rendered, "parse_mode": "HTML"},
+            fallback_text=self._render_plain(text),
         )
-        response.raise_for_status()
-        return response.json()
 
     def send_draft(self, chat_id: str, draft_id: int, text: str) -> dict[str, Any]:
         """Send or update a draft preview via sendMessageDraft (Bot API 9.5+)."""
         if not self.token:
             raise RuntimeError("telegram bot token is not configured")
         rendered = self._render_telegram_html(text)
-        response = self.client.post(
-            f"https://api.telegram.org/bot{self.token}/sendMessageDraft",
-            json={"chat_id": chat_id, "draft_id": draft_id, "text": rendered, "parse_mode": "HTML"},
+        return self._post_telegram(
+            "sendMessageDraft",
+            {"chat_id": chat_id, "draft_id": draft_id, "text": rendered, "parse_mode": "HTML"},
+            fallback_text=self._render_plain(text),
         )
-        response.raise_for_status()
-        return response.json()
 
     def delete_message(self, chat_id: str, message_id: int) -> None:
         """Delete a message. Best-effort, errors are ignored."""
@@ -155,12 +157,46 @@ class TelegramAdapter:
         except Exception:
             pass  # typing indicator is best-effort
 
+    def set_reaction(self, chat_id: str, message_id: int, emoji: str) -> None:
+        """React to a message (best-effort). Requires Telegram support + enabled flag."""
+        if not self.token or not self.reactions_enabled:
+            return
+        try:
+            self.client.post(
+                f"https://api.telegram.org/bot{self.token}/setMessageReaction",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reaction": [{"type": "emoji", "emoji": emoji}],
+                },
+            )
+        except Exception:
+            pass
+
+    def set_commands(self, commands: list[dict[str, str]]) -> None:
+        """Configure Telegram's command menu (setMyCommands). Best-effort."""
+        if not self.token:
+            return
+        try:
+            self.client.post(
+                f"https://api.telegram.org/bot{self.token}/setMyCommands",
+                json={"commands": commands},
+            ).raise_for_status()
+        except Exception:
+            # best-effort; menu is optional
+            pass
+
+    def _render_plain(self, text: str) -> str:
+        """Plain text fallback used when Telegram rejects HTML parsing."""
+        return self._sanitize_outbound_text(text)
+
     def _render_telegram_html(self, text: str) -> str:
+        """Render a small markdown-ish subset into Telegram-safe HTML."""
         escaped = escape(text)
         placeholders: dict[str, str] = {}
 
         def stash(prefix: str, value: str) -> str:
-            key = f"@@{prefix}_{len(placeholders)}@@"
+            key = f"TGPH{prefix}{uuid4().hex}HPGT"
             placeholders[key] = value
             return key
 
@@ -171,13 +207,71 @@ class TelegramAdapter:
         def replace_inline_code(match: re.Match[str]) -> str:
             return stash("CODE", f"<code>{match.group(1)}</code>")
 
-        rendered = re.sub(r"```(?:[a-zA-Z0-9_+-]+\n)?(.*?)```", replace_block_code, escaped, flags=re.DOTALL)
+        rendered = escaped
+
+        # Code first (protect from subsequent formatting passes)
+        rendered = re.sub(r"```(?:[a-zA-Z0-9_+-]+\n)?(.*?)```", replace_block_code, rendered, flags=re.DOTALL)
         rendered = re.sub(r"`([^`]+)`", replace_inline_code, rendered)
+
+        # Bold
         rendered = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", rendered, flags=re.DOTALL)
         rendered = re.sub(r"__(.+?)__", r"<b>\1</b>", rendered, flags=re.DOTALL)
+
+        # Italics (simple, avoids spanning newlines)
+        rendered = re.sub(r"(?<!\*)\*(?!\*)([^\n*]+)(?<!\*)\*(?!\*)", r"<i>\1</i>", rendered)
+        rendered = re.sub(r"(?<!_)_(?!_)([^\n_]+)(?<!_)_(?!_)", r"<i>\1</i>", rendered)
+
+        # Lists: Telegram HTML does not support <ul>/<ol>, so render bullet chars.
+        rendered = re.sub(r"(?m)^[ \t]*[-*][ \t]+", "• ", rendered)
+        rendered = re.sub(r"(?m)^[ \t]*\d+\.[ \t]+", "• ", rendered)
+
+        # Collapse excessive blank lines
+        rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+
         for key, value in placeholders.items():
             rendered = rendered.replace(key, value)
-        return rendered
+        return self._sanitize_outbound_text(rendered)
+
+    def _sanitize_outbound_text(self, text: str) -> str:
+        """Rewrite placeholder-like tokens so they cannot leak to chat."""
+        return _OUTBOUND_PLACEHOLDER_RE.sub(r"@ @\1@ @", text)
+
+    def _post_telegram(
+        self,
+        method: str,
+        payload: dict[str, Any],
+        *,
+        fallback_text: str | None = None,
+    ) -> dict[str, Any]:
+        """POST to Telegram with a safe fallback when HTML parse fails."""
+        if not self.token:
+            raise RuntimeError("telegram bot token is not configured")
+        url = f"https://api.telegram.org/bot{self.token}/{method}"
+        clean_payload = dict(payload)
+        if isinstance(clean_payload.get("text"), str):
+            clean_payload["text"] = self._sanitize_outbound_text(clean_payload["text"])
+        if fallback_text is not None:
+            fallback_text = self._sanitize_outbound_text(fallback_text)
+        try:
+            resp = self.client.post(url, json=clean_payload)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            # If Telegram rejects HTML entities, retry as plain text.
+            body = exc.response.text.lower() if exc.response is not None else ""
+            if (
+                fallback_text is not None
+                and exc.response is not None
+                and exc.response.status_code == 400
+                and ("can't parse entities" in body or "cant parse entities" in body)
+            ):
+                fallback_payload = dict(clean_payload)
+                fallback_payload.pop("parse_mode", None)
+                fallback_payload["text"] = fallback_text
+                resp2 = self.client.post(url, json=fallback_payload)
+                resp2.raise_for_status()
+                return resp2.json()
+            raise
 
     def set_handlers(self, *, inbound_handler: Any, health_handler: Any) -> None:
         self._inbound_handler = inbound_handler

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, TYPE_CHECKING
 
 from ..models import NormalizedInboundEvent, PlannedAction, WorkflowPlan
@@ -9,14 +10,53 @@ if TYPE_CHECKING:
     from .core import Gateway
 
 
-class WorkflowPlanner:
-    """Deterministic planner for slash commands only.
+_LIVE_ANALYZE_TRIGGER = re.compile(r"\b(live|current)\b", re.IGNORECASE)
+_ANALYZE_WORD = re.compile(r"\b(analy[sz]e|analysis|dekh|check)\b", re.IGNORECASE)
+_STOPWORDS = {
+    "live", "current", "analyse", "analyze", "analysis", "dekh", "dekho", "check", "bata", "batao",
+    "kar", "kr", "karde", "krde", "bhai", "bro", "pls", "please", "technical", "technically",
+    "chart", "setup", "swing", "positional",
+}
 
-    All LLM-driven routing is now handled by the ReAct loop.
+
+def _extract_symbol(text: str) -> str | None:
+    """Extract a best-effort NSE-style symbol from free-form Hinglish text.
+
+    Examples:
+    - "jkcement analyse" -> JKCEMENT
+    - "live laurus labs analyse" -> LAURUSLABS
+    """
+    tokens = [t for t in re.split(r"[^A-Za-z0-9]+", text) if t]
+    if not tokens:
+        return None
+    cleaned = [t for t in tokens if t.lower() not in _STOPWORDS]
+    if not cleaned:
+        return None
+    # Join remaining words into a plausible symbol.
+    symbol = "".join(cleaned)
+    symbol = re.sub(r"[^A-Za-z0-9]", "", symbol).upper()
+    if not symbol or len(symbol) < 3:
+        return None
+    return symbol
+
+
+class WorkflowPlanner:
+    """Deterministic planner for slash commands, plus a small set of high-value NL routers.
+
+    Most LLM-driven routing is handled by the ReAct loop.
+
+    We keep a few deterministic routes to prevent common UX failure modes:
+    - "live/current technical analysis" should always fetch data via the swing-trader skill
+      instead of asking the user to repeat trigger phrases.
     """
 
     def __init__(self, gw: Gateway) -> None:
         self._gw = gw
+
+    def _live_analyze_router_enabled(self) -> bool:
+        config = getattr(self._gw, "_config", None)
+        execution = getattr(config, "execution", None)
+        return bool(getattr(execution, "enable_live_analyze_nl_router", False))
 
     async def plan_workflow(self, event: NormalizedInboundEvent, *, session_key: str | None = None) -> WorkflowPlan:
         gw = self._gw
@@ -42,6 +82,12 @@ class WorkflowPlanner:
         # Help
         if lowered == "/help":
             return gw._workflow("capabilities.read", [PlannedAction(action="capabilities.read", payload={})], renderer="capabilities.read")
+        if lowered in {"/usage", "usage"}:
+            return gw._workflow("usage.summary", [PlannedAction(action="usage.summary", payload={"window_hours": 24})], renderer="usage.summary")
+        if lowered in {"/skills", "skills"}:
+            return gw._workflow("skills.read", [PlannedAction(action="skills.read", payload={})], renderer="capabilities.read")
+        if lowered in {"/jobs", "jobs"}:
+            return gw._workflow("jobs.list", [PlannedAction(action="jobs.list", payload={"limit": 20})], renderer="jobs.list")
 
         # Web search
         if text.startswith("/search "):
@@ -64,6 +110,21 @@ class WorkflowPlanner:
             gws_workflow = self._parse_gws_slash(text)
             if gws_workflow is not None:
                 return gws_workflow
+
+        # Optional NL router: keep disabled by default in favor of ReAct + tools.
+        if self._live_analyze_router_enabled() and _LIVE_ANALYZE_TRIGGER.search(lowered) and _ANALYZE_WORD.search(lowered):
+            symbol = _extract_symbol(text)
+            if symbol is not None:
+                command = (
+                    "python3 skills/swing-trader/scripts/scanner.py analyze "
+                    f"--symbol {symbol} --timeframe daily"
+                )
+                return gw._workflow(
+                    "trading.live_analyze",
+                    [PlannedAction(action="shell.exec", payload={"command": command})],
+                    renderer="default",
+                    skill_ids=["swing-trader"],
+                )
 
         # Fallback: empty workflow (will be handled by react loop)
         return gw._workflow("chat.respond", [], renderer="default")
