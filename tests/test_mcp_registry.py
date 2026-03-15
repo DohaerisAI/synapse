@@ -95,7 +95,7 @@ async def test_get_tool_not_found():
 
 
 @pytest.mark.asyncio
-async def test_capabilities_from_tools():
+async def test_tool_names_from_registry():
     from synapse.mcp.registry import MCPRegistry
     registry = MCPRegistry()
     tools = [
@@ -103,8 +103,7 @@ async def test_capabilities_from_tools():
         MCPToolDefinition(name="get_positions", description="Fetch positions", input_schema={}, server_id="kite"),
     ]
     await registry.register_adapter(FakeAdapter("kite", tools))
-    caps = registry.capabilities_from_tools()
-    assert len(caps) == 2
-    assert caps[0].action == "mcp.kite.get_holdings"
-    assert caps[0].family == "mcp.kite"
-    assert caps[0].description == "Fetch holdings"
+    names = registry.tool_names()
+    assert len(names) == 2
+    assert "get_holdings" in names
+    assert "get_positions" in names

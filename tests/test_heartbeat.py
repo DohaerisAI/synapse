@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from synapse.models import HeartbeatStatus, NormalizedInboundEvent
+from synapse.models import HeartbeatStatus, NormalizedInboundEvent, RunState
 from synapse.runtime import build_runtime
 
 
@@ -55,18 +55,19 @@ async def test_runtime_heartbeat_respects_active_hours(tmp_path, monkeypatch) ->
 async def test_runtime_clears_queue_and_cancels_active_runs_on_start(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     runtime = build_runtime(tmp_path)
-    session_event = NormalizedInboundEvent(
+    session_key = "telegram__chat-1__user-1"
+
+    # Manually create an active run stuck in EXECUTING state
+    event = NormalizedInboundEvent(
         adapter="telegram",
         channel_id="chat-1",
         user_id="user-1",
         message_id="message-1",
-        text="/remember-global needs approval",
+        text="stuck request",
     )
+    run = runtime.store.create_run(session_key, event)
+    runtime.store.set_run_state(run.run_id, RunState.EXECUTING)
 
-    first = await runtime.gateway.ingest(session_event)
-    assert first.status == "WAITING_APPROVAL"
-
-    session_key = first.session_key
     runtime.store.enqueue_event(
         session_key,
         NormalizedInboundEvent(
@@ -74,21 +75,19 @@ async def test_runtime_clears_queue_and_cancels_active_runs_on_start(tmp_path, m
             channel_id="chat-1",
             user_id="user-1",
             message_id="message-2",
-            text="yes go ahead",
+            text="follow up",
         ),
     )
 
     runtime.start_background_services()
     try:
-        run = runtime.store.get_run(first.run_id)
-        pending = runtime.store.get_pending_approval_for_session(session_key)
+        run_after = runtime.store.get_run(run.run_id)
         queued = runtime.store.peek_next_queued_event(session_key)
     finally:
         runtime.stop_background_services()
 
-    assert run is not None
-    assert run.state.value == "CANCELLED"
-    assert pending is None
+    assert run_after is not None
+    assert run_after.state.value == "CANCELLED"
     assert queued is None
 
 

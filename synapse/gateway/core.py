@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from ..broker import CapabilityBroker
 from ..executors import HostExecutor, IsolatedExecutor
 from ..hooks import HookEventType, HookRunner
 from ..identifiers import derive_session_key
@@ -28,23 +27,21 @@ from ..skills import SkillRegistry
 from ..store import SQLiteStore
 from ..workspace import WorkspaceStore
 
-from .agent_loop import AgentLoop
-from .approval import ApprovalHandler
 from .context import ContextBuilder
-from .executor import WorkflowExecutor
 from .extractors import RequestExtractors
-from .action_planner import ActionPlanner
-from .gws_planner import GWSPlanner
 from .ingest import IngestHandler
 from .planner import WorkflowPlanner
-from .renderer import ReplyRenderer
 from .state import StateManager
+
+from typing import TYPE_CHECKING as _TC
+if _TC:
+    from ..tools.registry import ToolRegistry as _ToolRegistry
+    from ..approvals import ApprovalManager as _ApprovalManager
 
 
 class Gateway:
     AGENT_LOOP_MAX_TURNS = 4
 
-    # Expose PlannedAction for sub-modules that need it via gw reference
     _PlannedAction = PlannedAction
 
     def __init__(
@@ -54,43 +51,46 @@ class Gateway:
         memory: MemoryStore,
         workspace: WorkspaceStore,
         skills: SkillRegistry,
-        broker: CapabilityBroker,
         state_machine: SessionStateMachine,
-        host_executor: HostExecutor,
-        isolated_executor: IsolatedExecutor,
         model_router: ModelRouter,
         agent_name: str = "Agent",
         assistant_instructions: str = "",
-        gws_planner_instructions: str = "",
         heartbeat_path: Path | None = None,
         hooks: HookRunner | None = None,
+        tool_registry: "_ToolRegistry | None" = None,
+        approval_manager: "_ApprovalManager | None" = None,
+        diagnosis_engine: Any = None,
+        # Legacy kwargs accepted but ignored (for backward compat during migration)
+        broker: Any = None,
+        host_executor: Any = None,
+        isolated_executor: Any = None,
+        gws_planner_instructions: str = "",
     ) -> None:
         self.store = store
         self.memory = memory
         self.workspace = workspace
         self.skills = skills
-        self.broker = broker
         self.state_machine = state_machine
-        self.host_executor = host_executor
-        self.isolated_executor = isolated_executor
         self.model_router = model_router
         self.agent_name = agent_name.strip() or "Agent"
         self.assistant_instructions = assistant_instructions.strip()
         self.gws_planner_instructions = gws_planner_instructions.strip()
         self.heartbeat_path = heartbeat_path
         self.hooks = hooks or HookRunner()
+        self.tool_registry = tool_registry
+        self.approval_manager = approval_manager
+        self.diagnosis_engine = diagnosis_engine
+
+        # Legacy references kept for tests / ingest handler that still reference them
+        self.broker = broker
+        self.host_executor = host_executor
+        self.isolated_executor = isolated_executor
 
         # Sub-handlers
-        self.approval_handler = ApprovalHandler(self)
         self.context_builder = ContextBuilder(self)
         self.extractors = RequestExtractors(self)
-        self.gws_planner = GWSPlanner(self)
-        self.action_planner = ActionPlanner(self)
-        self.executor = WorkflowExecutor(self)
         self.state_manager = StateManager(self)
-        self.renderer = ReplyRenderer(self)
         self.planner = WorkflowPlanner(self)
-        self.agent_loop = AgentLoop(self)
         self.ingest_handler = IngestHandler(self)
 
     async def ingest(self, event: NormalizedInboundEvent, *, stream_sink: StreamSink | None = None) -> GatewayResult:
@@ -141,11 +141,9 @@ class Gateway:
         try:
             return await self._process_run(run, event, session_key, current, stream_sink=stream_sink)
         except Exception:
-            # Safety net: ensure the run never stays stuck in an intermediate state
             try:
                 self.state_manager.transition(run, current, RunState.FAILED, {"detail": "unhandled exception in ingest pipeline"})
             except Exception:
-                # Last resort: force state directly
                 self.store.set_run_state(run.run_id, RunState.FAILED)
             raise
 
@@ -158,106 +156,36 @@ class Gateway:
         *,
         stream_sink: StreamSink | None = None,
     ) -> GatewayResult:
-        pending_input = await self.planner.plan_pending_input(event, session_key=session_key)
-        if pending_input is not None:
-            current = self.state_manager.transition(
-                run,
-                current,
-                RunState.PLANNED,
-                {"pending_input_kind": pending_input["kind"]},
-            )
-            input_request = self.store.create_input_request(
-                run.run_id,
-                session_key,
-                kind=str(pending_input["kind"]),
-                payload=dict(pending_input["payload"]),
-                prompt=str(pending_input["prompt"]),
-            )
-            self.state_manager.transition(run, current, RunState.WAITING_INPUT, {"input_id": input_request.input_id})
-            reply_text = input_request.prompt
-            self.memory.append_transcript(session_key, {"role": "assistant", "content": reply_text})
-            self.store.append_run_event(
-                run.run_id,
-                session_key,
-                "workflow.paused_for_input",
-                {"input_id": input_request.input_id, "kind": input_request.kind, "payload": input_request.payload},
-            )
-            return GatewayResult(
-                run_id=run.run_id,
-                session_key=session_key,
-                status=RunState.WAITING_INPUT.value,
-                reply_text=reply_text,
-            )
+        # Deterministic commands (slash commands, patterns) use the planner path
+        if self._is_deterministic_command(event.text):
+            return await self._process_slash_command(run, event, session_key, current, stream_sink=stream_sink)
 
+        # Everything else goes through the ReAct loop
+        return await self._process_run_react(run, event, session_key, current, stream_sink=stream_sink)
+
+    async def _process_slash_command(
+        self,
+        run: RunRecord,
+        event: NormalizedInboundEvent,
+        session_key: str,
+        current: RunState,
+        *,
+        stream_sink: StreamSink | None = None,
+    ) -> GatewayResult:
+        """Handle deterministic slash commands via the planner → executor path."""
         workflow = await self.planner.plan_workflow(event, session_key=session_key)
-        self.store.append_run_event(
-            run.run_id,
-            session_key,
-            "workflow.planned",
-            workflow.to_dict(),
-        )
+        self.store.append_run_event(run.run_id, session_key, "workflow.planned", workflow.to_dict())
         current = self.state_manager.transition(
-            run,
-            current,
-            RunState.PLANNED,
+            run, current, RunState.PLANNED,
             {"workflow_id": workflow.workflow_id, "step_count": len(workflow.steps), "intent": workflow.intent},
         )
 
-        if workflow.intent == "chat.respond" and not workflow.steps and not self.context_builder.is_heartbeat(event):
-            result = await self.agent_loop.run(run, event, current, stream_sink=stream_sink)
-            if result.status == RunState.COMPLETED.value:
-                await self._drain_queue(session_key)
-            return result
+        if not workflow.steps:
+            # No actions — fall through to react loop for a chat response
+            return await self._process_run_react(run, event, session_key, current, stream_sink=stream_sink)
 
-        decisions = [(step, self.broker.decide(step.action)) for step in workflow.steps]
-        disallowed = [pair for pair in decisions if not pair[1].allowed]
-        if disallowed:
-            return self._fail_run(run, event, current, "one or more planned actions were rejected by policy")
-
-        workflow = self.approval_handler.apply_decisions_to_workflow(workflow, decisions)
-        if workflow.approval_required:
-            pre_approval_workflow, approval_workflow = self.approval_handler.split_workflow_for_approval(workflow)
-            execution_results: list[dict[str, Any]] = []
-            if pre_approval_workflow.steps:
-                current, execution_results = await self.executor.execute_workflow(run, current, pre_approval_workflow)
-                if any(not item["success"] for item in execution_results):
-                    reply_text = await self.state_manager.finalize_reply(run, event, current, execution_results, workflow)
-                    final_current = self.state_manager.finalize_reply_text(run, event, current, execution_results, workflow, reply_text)
-                    await self._drain_queue(session_key)
-                    return GatewayResult(
-                        run_id=run.run_id,
-                        session_key=session_key,
-                        status=final_current.value,
-                        reply_text=reply_text,
-                    )
-            approval = self.store.create_approval(
-                run.run_id,
-                session_key,
-                "workflow.execute",
-                {
-                    "event": event.to_dict(),
-                    "workflow": approval_workflow.to_dict(),
-                    "pre_approval_results": execution_results,
-                },
-            )
-            self.state_manager.transition(run, current, RunState.WAITING_APPROVAL, {"approval_id": approval.approval_id})
-            reply_text = self.approval_handler.approval_reply_text(approval_workflow)
-            self.memory.append_transcript(session_key, {"role": "assistant", "content": reply_text})
-            self.store.append_run_event(
-                run.run_id,
-                session_key,
-                "workflow.paused_for_approval",
-                {"approval_id": approval.approval_id, "workflow": approval_workflow.to_dict(), "pre_approval_results": execution_results},
-            )
-            return GatewayResult(
-                run_id=run.run_id,
-                session_key=session_key,
-                status=RunState.WAITING_APPROVAL.value,
-                reply_text=reply_text,
-                approval_id=approval.approval_id,
-            )
-
-        current, execution_results = await self.executor.execute_workflow(run, current, workflow)
+        # Execute the workflow steps
+        current, execution_results = await self._execute_workflow(run, current, workflow)
         reply_text = await self.state_manager.finalize_reply(run, event, current, execution_results, workflow)
         final_current = self.state_manager.finalize_reply_text(run, event, current, execution_results, workflow, reply_text)
         await self._drain_queue(session_key)
@@ -268,7 +196,152 @@ class Gateway:
             reply_text=reply_text,
         )
 
+    async def _execute_workflow(
+        self,
+        run: RunRecord,
+        current: RunState,
+        workflow: WorkflowPlan,
+    ) -> tuple[RunState, list[dict[str, Any]]]:
+        """Execute workflow steps using host/isolated executors."""
+        execution_results: list[dict[str, Any]] = []
+        if not workflow.steps:
+            return current, execution_results
+        current = self.state_manager.transition(
+            run, current, RunState.EXECUTING,
+            {"workflow_id": workflow.workflow_id, "step_count": len(workflow.steps), "intent": workflow.intent},
+        )
+        for index, step in enumerate(workflow.steps, start=1):
+            action = self._resolve_step_action(step.action, execution_results)
+            self.store.append_run_event(
+                run.run_id, run.session_key, "workflow.step.started",
+                {"workflow_id": workflow.workflow_id, "step_id": step.step_id, "index": index, "action": action.to_dict()},
+            )
+            if self.host_executor is not None:
+                result = await self.host_executor.execute(action, session_key=run.session_key, user_id=run.user_id)
+            elif self.isolated_executor is not None:
+                result = await self.isolated_executor.execute(action)
+            else:
+                from ..models import ExecutionResult
+                result = ExecutionResult(action=action.action, success=False, detail="no executor available")
+            result_payload = {"action": result.action, "success": result.success, "detail": result.detail, "artifacts": result.artifacts}
+            execution_results.append(result_payload)
+            self.store.append_run_event(
+                run.run_id, run.session_key, "workflow.step.completed",
+                {"workflow_id": workflow.workflow_id, "step_id": step.step_id, "index": index, "result": result_payload},
+            )
+            if not result.success:
+                break
+        current = self.state_manager.transition(run, current, RunState.VERIFYING, {"results": execution_results})
+        return current, execution_results
+
+    async def _process_run_react(
+        self,
+        run: RunRecord,
+        event: NormalizedInboundEvent,
+        session_key: str,
+        current: RunState,
+        *,
+        stream_sink: StreamSink | None = None,
+    ) -> GatewayResult:
+        """Process a run using the ReAct agent loop with native tool calling."""
+        from ..react_loop import run_react_loop
+        from ..tools.registry import ToolContext
+
+        system_prompt = self.context_builder.react_system_prompt(session_key, run.user_id, event)
+
+        attachment_summary = self.context_builder.attachment_summary(event)
+        attachments = self.context_builder.attachment_list(event)
+        user_message: dict[str, Any] = {"role": "user", "content": event.text}
+        if attachments:
+            user_message["attachments"] = attachments
+        messages: list[dict[str, Any]] = [user_message]
+        if attachment_summary:
+            messages.append({"role": "system", "content": attachment_summary})
+
+        tool_context = ToolContext(
+            session_key=session_key,
+            user_id=run.user_id,
+            memory=self.memory,
+            store=self.store,
+            config=getattr(self, "_config", None),
+            skill_registry=self.skills,
+            diagnosis_engine=self.diagnosis_engine,
+        )
+
+        tools = self.tool_registry.all_tools() if self.tool_registry else []
+
+        class _ChatAdapter:
+            def __init__(self, router: ModelRouter):
+                self._router = router
+
+            async def chat(self, msgs, *, system=None, tools=None, stream_sink=None):
+                return await self._router.chat(
+                    msgs, system_prompt=system, tools=tools, sink=stream_sink,
+                )
+
+        adapter = _ChatAdapter(self.model_router)
+        current = self.state_manager.transition(run, current, RunState.EXECUTING, {"mode": "react_loop"})
+
+        try:
+            result = await run_react_loop(
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                model_router=adapter,
+                approval_manager=self.approval_manager,
+                stream_sink=stream_sink,
+                max_turns=self.AGENT_LOOP_MAX_TURNS * 2,
+                session_key=session_key,
+                tool_context=tool_context,
+            )
+        except Exception as exc:
+            self.state_manager.transition(run, current, RunState.FAILED, {"detail": str(exc)})
+            raise
+
+        for tc in result.tool_calls_made:
+            self.store.append_run_event(
+                run.run_id, session_key, "react.tool_call",
+                {"tool": tc["tool"], "turn": tc.get("turn"), "error": tc.get("error")},
+            )
+
+        reply_text = result.reply.strip()
+        # Heartbeat with no model → default to OK
+        if reply_text == "[No model available.]" and self.context_builder.is_heartbeat(event):
+            reply_text = "HEARTBEAT_OK"
+        suppress = reply_text == "NO_REPLY"
+
+        current = self.state_manager.transition(run, current, RunState.RESPONDING, {"reply": reply_text})
+        self.memory.append_transcript(session_key, {"role": "assistant", "content": reply_text})
+        self.store.append_run_event(
+            run.run_id, session_key, "run.response",
+            {"reply_text": reply_text, "turns": result.turns, "tool_calls": len(result.tool_calls_made)},
+        )
+        current = self.state_manager.transition(run, current, RunState.COMPLETED, {"completed": True})
+
+        self.memory.write_summary(
+            session_key,
+            "\n".join([
+                "# Session Summary",
+                "",
+                f"- Last user message: {event.text}",
+                f"- Run state: {current.value}",
+                f"- Tool calls: {len(result.tool_calls_made)}",
+                f"- Turns: {result.turns}",
+                f"- Reply: {reply_text}",
+            ]),
+        )
+
+        await self._drain_queue(session_key)
+        return GatewayResult(
+            run_id=run.run_id,
+            session_key=session_key,
+            status=current.value,
+            reply_text=reply_text,
+            suppress_delivery=suppress,
+        )
+
     async def approve(self, approval_id: str) -> GatewayResult:
+        """Handle approval — kept for ingest handler chat approval flow."""
         approval = self.store.get_approval(approval_id)
         if approval is None:
             raise KeyError(f"unknown approval id: {approval_id}")
@@ -288,33 +361,12 @@ class Gateway:
             workflow = self._workflow_from_actions("approved-actions", actions)
         pre_approval_results = list(approval.payload.get("pre_approval_results", []))
         self.store.update_approval_status(approval_id, ApprovalStatus.APPROVED)
-        if bool(approval.payload.get("agent_loop")):
-            current, execution_results = await self.executor.execute_workflow(run, RunState.WAITING_APPROVAL, workflow)
-            combined_results = list(pre_approval_results) + execution_results
-            reply_text = await self.state_manager.finalize_reply(run, event, current, combined_results, workflow)
-            final_current = self.state_manager.finalize_reply_text(run, event, current, combined_results, workflow, reply_text)
-            return GatewayResult(
-                run_id=run.run_id,
-                session_key=run.session_key,
-                status=final_current.value,
-                reply_text=reply_text,
-            )
-        result = await self._execute_and_respond(run, event, RunState.WAITING_APPROVAL, workflow, pre_approval_results)
-        await self._drain_queue(run.session_key)
-        return result
 
-    async def _execute_and_respond(
-        self,
-        run: RunRecord,
-        event: NormalizedInboundEvent,
-        current: RunState,
-        workflow: WorkflowPlan,
-        pre_approval_results: list[dict[str, Any]] | None = None,
-    ) -> GatewayResult:
-        current, execution_results = await self.executor.execute_workflow(run, current, workflow)
-        combined_results = list(pre_approval_results or []) + execution_results
+        current, execution_results = await self._execute_workflow(run, RunState.WAITING_APPROVAL, workflow)
+        combined_results = list(pre_approval_results) + execution_results
         reply_text = await self.state_manager.finalize_reply(run, event, current, combined_results, workflow)
         final_current = self.state_manager.finalize_reply_text(run, event, current, combined_results, workflow, reply_text)
+        await self._drain_queue(run.session_key)
         return GatewayResult(
             run_id=run.run_id,
             session_key=run.session_key,
@@ -355,15 +407,13 @@ class Gateway:
         self.memory.append_transcript(run.session_key, {"role": "assistant", "content": reply_text})
         self.memory.write_summary(
             run.session_key,
-            "\n".join(
-                [
-                    "# Session Summary",
-                    "",
-                    f"- Last user message: {event.text}",
-                    f"- Run state: {current.value}",
-                    f"- Failure detail: {detail}",
-                ]
-            ),
+            "\n".join([
+                "# Session Summary",
+                "",
+                f"- Last user message: {event.text}",
+                f"- Run state: {current.value}",
+                f"- Failure detail: {detail}",
+            ]),
         )
         return GatewayResult(run_id=run.run_id, session_key=run.session_key, status=current.value, reply_text=reply_text)
 
@@ -374,16 +424,49 @@ class Gateway:
         if next_event is not None:
             await self.ingest(next_event)
 
+    def _is_deterministic_command(self, text: str) -> bool:
+        """Check if text is a deterministic slash command (not react loop).
+
+        NL patterns (memory, preferences, reminders, integrations) are handled
+        by the LLM via tool calls in the react loop.
+        """
+        stripped = text.strip()
+        lowered = stripped.lower()
+        if not stripped.startswith("/"):
+            return False
+        slash_prefixes = (
+            "/memory", "/remember-", "/forget-", "/help", "/search ",
+            "/shell ", "/fetch ", "/propose-patch ", "/gws ",
+            "/quit", "/exit", "/q", "/mcp", "/events",
+            "/what-do-you-remember",
+        )
+        return any(lowered.startswith(p) or lowered == p.rstrip() for p in slash_prefixes)
+
     def _resolved_provider_name(self) -> str | None:
         profile = self.model_router.resolve_profile()
         return None if profile is None else f"{profile.provider}/{profile.model}"
 
-    # Backward-compat delegations for tests that access internal methods
-    async def _intent_mode(self, event: NormalizedInboundEvent, *, session_key: str | None = None) -> str:
-        return await self.planner._intent_mode(event, session_key=session_key)
+    def _resolve_step_action(self, action: PlannedAction, execution_results: list[dict[str, Any]]) -> PlannedAction:
+        """Resolve $last. references in action payloads from prior step results."""
+        if not execution_results:
+            return action
+        payload = json.loads(json.dumps(action.payload, ensure_ascii=True))
+        last_artifacts = execution_results[-1].get("artifacts", {})
+        last_output = last_artifacts.get("output", {})
 
-    async def _run_skill_gws_planner(self, text: str, **kwargs: Any) -> dict[str, Any] | None:
-        return await self.gws_planner.run_skill_gws_planner(text, **kwargs)
+        def resolve(value: Any) -> Any:
+            if isinstance(value, str) and value.startswith("$last."):
+                key = value.removeprefix("$last.")
+                if isinstance(last_output, dict) and key in last_output:
+                    return last_output[key]
+                return last_artifacts.get(key, value)
+            if isinstance(value, list):
+                return [resolve(item) for item in value]
+            if isinstance(value, dict):
+                return {key: resolve(item) for key, item in value.items()}
+            return value
+
+        return PlannedAction(action=action.action, payload=resolve(payload))
 
     def _parse_model_json(self, text: str | None) -> dict[str, Any] | None:
         if not text:

@@ -38,6 +38,10 @@ def main() -> None:
     serve_p.add_argument("--host", default=None, help="bind host (default: from config or 127.0.0.1)")
     serve_p.add_argument("--port", type=int, default=None, help="bind port (default: from config or 8000)")
 
+    # chat (REPL)
+    chat_p = sub.add_parser("chat", help="Interactive terminal chat (like Claude Code)")
+    chat_p.add_argument("--root", default=".", help="project root")
+
     # tui
     tui_p = sub.add_parser("tui", help="Launch the TUI dashboard")
     tui_p.add_argument("--root", default=".", help="project root")
@@ -128,6 +132,12 @@ def main() -> None:
 
     if command == "service":
         _handle_service(args, root)
+        return
+
+    if command == "chat":
+        from .repl import run_repl
+        runtime = build_runtime(root)
+        run_repl(runtime)
         return
 
     if command == "tui":

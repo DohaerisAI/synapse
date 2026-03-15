@@ -25,7 +25,8 @@ def test_integration_registry_scaffolds_and_applies(tmp_path) -> None:
     assert "activate github" in (tmp_path / "BOOT.md").read_text(encoding="utf-8")
 
 
-async def test_gateway_add_integration_waits_for_approval_then_applies(tmp_path, monkeypatch) -> None:
+async def test_gateway_nl_integration_goes_to_react_loop(tmp_path, monkeypatch) -> None:
+    """NL integration requests now go through react loop (not deterministic path)."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     runtime = build_runtime(tmp_path)
 
@@ -39,18 +40,8 @@ async def test_gateway_add_integration_waits_for_approval_then_applies(tmp_path,
         )
     )
 
-    assert result.status == "WAITING_APPROVAL"
-    assert "Waiting for approval" in result.reply_text
-    staged = runtime.integrations.get("github")
-    assert staged is not None
-    assert staged.status is IntegrationStatus.TESTED
-
-    approved = await runtime.gateway.approve(result.approval_id or "")
-    applied = runtime.integrations.get("github")
-
-    assert approved.status == "COMPLETED"
-    assert applied is not None
-    assert applied.status in {IntegrationStatus.APPROVED, IntegrationStatus.ACTIVE}
+    # React loop runs but no model is configured → "[No model available.]"
+    assert result.status == "COMPLETED"
 
 
 def test_runtime_reactivates_approved_integrations_on_restart(tmp_path, monkeypatch) -> None:

@@ -197,7 +197,7 @@ async def test_openai_codex_responses_provider_builds_direct_request() -> None:
 
     result = await provider.generate([{"role": "user", "content": "say ok"}], system_prompt="be exact")
 
-    assert result == "ok from responses"
+    assert result.text == "ok from responses"
     assert calls["url"] == "https://chatgpt.com/backend-api/codex/responses"
     assert calls["headers"]["Authorization"] == "Bearer access-token"
     assert calls["headers"]["ChatGPT-Account-Id"] == "acct_123"
@@ -254,7 +254,7 @@ async def test_openai_codex_responses_provider_includes_inline_image_parts() -> 
         ]
     )
 
-    assert result == "saw image"
+    assert result.text == "saw image"
     assert calls["json"]["input"][0]["content"][1] == {
         "type": "input_image",
         "image_url": "data:image/png;base64,abc123",
@@ -297,7 +297,7 @@ async def test_openai_codex_responses_provider_parses_stream_deltas() -> None:
 
     result = await provider.generate([{"role": "user", "content": "say hello"}])
 
-    assert result == "hello world"
+    assert result.text == "hello world"
 
 
 async def test_model_router_falls_back_to_codex_cli_when_direct_transport_fails(monkeypatch, tmp_path) -> None:
