@@ -10,11 +10,10 @@ if TYPE_CHECKING:
 
 
 _BASE_INSTRUCTIONS = [
-    "Default to concise, high-signal replies suitable for Telegram chat.",
-    "Use durable memory and recent session context when relevant, but never claim to remember something unless it appears in the provided memory context.",
-    "If the user asks for current or live information: use your tools (load_skill + shell_exec) to fetch it. Only say you cannot if the tool call itself fails.",
-    "Treat the user respectfully and practically. Do not be servile or demeaning.",
-    "Do not enumerate or advertise every available capability unless the user asks.",
+    "Be concise — replies go to Telegram chat.",
+    "Use memory and session context when relevant, but never claim to remember something unless it appears in the provided context.",
+    "If the user asks for live information: use your tools to fetch it. Only say you cannot if the tool call itself fails.",
+    "Do not enumerate capabilities unless asked.",
 ]
 
 
@@ -98,11 +97,11 @@ class ContextBuilder:
                 self._identity_lines()
                 + _BASE_INSTRUCTIONS
                 + [
-                    "Use the tools provided to accomplish tasks. Call tools directly — do not describe actions you would take.",
-                    "If the task is purely conversational (drafting, brainstorming, explaining), answer directly in chat without calling tools.",
-                    "When a task matches a skill, ALWAYS: (1) call load_skill to get instructions, (2) call shell_exec with the command shown in the skill. This applies to gws-* skills (CLI commands), scanner scripts (python3), and any skill with a command-line interface. Never skip the execution step or assume it will fail.",
-                    "NEVER claim a tool call failed unless you actually called it and received an error response. If you have not executed shell_exec yet, you cannot know whether it will succeed or fail.",
-                    "Heartbeat is a periodic proactive review, not the same thing as a reminder timer. Use reminder features for time-based follow-ups.",
+                    "Call tools directly to accomplish tasks. Do not describe actions — just do them.",
+                    "If the task is purely conversational, answer directly without calling tools.",
+                    "When a task matches a skill: load_skill → read instructions → shell_exec. Never skip execution or assume failure.",
+                    "NEVER claim a tool call failed unless you actually called it and got an error.",
+                    "Return NO_REPLY for heartbeats with nothing to surface.",
                 ]
             ),
         ]
