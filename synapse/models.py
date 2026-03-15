@@ -66,6 +66,15 @@ class ReminderStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class JobStatus(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    CANCEL_REQUESTED = "CANCEL_REQUESTED"
+    CANCELLED = "CANCELLED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
 class IntegrationStatus(StrEnum):
     PROPOSED = "PROPOSED"
     SCAFFOLDED = "SCAFFOLDED"
@@ -179,6 +188,7 @@ class SkillDefinition(BaseModel):
     instruction_markdown: str
     path: str = ""
     capabilities: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AuthProfile(BaseModel):
@@ -186,6 +196,38 @@ class AuthProfile(BaseModel):
     model: str
     source: str = ""
     settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class UsageEventRecord(BaseModel):
+    usage_id: int
+    run_id: str | None = None
+    session_key: str | None = None
+    provider: str
+    model: str
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    input_chars: int
+    output_chars: int
+    started_at: str
+    finished_at: str
+    duration_ms: int
+    status: str
+    error: str | None = None
+
+
+class ToolEventRecord(BaseModel):
+    tool_event_id: int
+    run_id: str | None = None
+    session_key: str | None = None
+    job_id: str | None = None
+    tool_name: str
+    needs_approval: bool
+    started_at: str
+    finished_at: str
+    duration_ms: int
+    status: str
+    error: str | None = None
 
 
 class GatewayResult(BaseModel):
@@ -196,6 +238,7 @@ class GatewayResult(BaseModel):
     approval_id: str | None = None
     queued: bool = False
     suppress_delivery: bool = False
+    delivery_target: DeliveryTarget | None = None
 
 
 class RunRecord(BaseModel):
@@ -220,6 +263,20 @@ class ApprovalRecord(BaseModel):
     updated_at: str
 
 
+class ProposalRecord(BaseModel):
+    proposal_id: str
+    repo_path: str
+    proposal_path: str
+    task: str
+    context: str
+    files: list[str] = Field(default_factory=list)
+    test_commands: list[str] = Field(default_factory=list)
+    summary: str = ""
+    status: str
+    created_at: str
+    updated_at: str
+
+
 class AdapterHealth(BaseModel):
     adapter: str
     status: str
@@ -233,6 +290,8 @@ class DeliveryTarget(BaseModel):
     adapter: str
     channel_id: str
     user_id: str
+    # Optional message_id for reactions or message edits.
+    message_id: str | None = None
 
 
 class HeartbeatRecord(BaseModel):
@@ -264,6 +323,33 @@ class ReminderRecord(BaseModel):
     updated_at: str
     delivered_at: str | None = None
     last_error: str | None = None
+
+
+class JobRecord(BaseModel):
+    job_id: str
+    tool_name: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    status: JobStatus
+    progress_current: int | None = None
+    progress_total: int | None = None
+    progress_message: str | None = None
+    result_summary: str | None = None
+    result_path: str | None = None
+    progress_path: str | None = None
+    artifact_root: str
+    error: str | None = None
+    parent_run_id: str | None = None
+    session_key: str | None = None
+    delivery_target_adapter: str | None = None
+    delivery_target_channel_id: str | None = None
+    delivery_target_user_id: str | None = None
+    approval_id: str | None = None
+    worker_id: str | None = None
+    cancel_requested_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    created_at: str
+    updated_at: str
 
 
 class IntegrationRecord(BaseModel):
