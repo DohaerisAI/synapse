@@ -16,9 +16,12 @@ logger = logging.getLogger(__name__)
 
 from .adapters import TelegramAdapter
 from .auth import AuthStore
+from .slack_adapter import SlackAdapter
 from .streaming.telegram_stream import TelegramDraftStream
+from .streaming.slack_stream import SlackMessageStream
 from .channels import ChannelRegistry
 from .channels.telegram import TelegramPlugin
+from .channels.slack import SlackPlugin
 from .config import AppConfig, CONFIG_FIELDS, load_config, merged_runtime_env
 from .diagnosis import DiagnosisEngine
 from .executors import HostExecutor, IsolatedExecutor
@@ -59,6 +62,7 @@ class Runtime:
     integrations: IntegrationRegistry
     gateway: Gateway
     telegram: TelegramAdapter
+    slack: SlackAdapter
     channel_registry: ChannelRegistry
     plugin_registry: PluginRegistry
     hooks: HookRunner
@@ -104,6 +108,12 @@ class Runtime:
             adapter="telegram",
             status=telegram_status["status"],
             auth_required=self.telegram.token is None,
+        )
+        slack_status = self.slack.status_snapshot()
+        self.store.upsert_adapter_health(
+            adapter="slack",
+            status=slack_status["status"],
+            auth_required=slack_status.get("auth_required", True),
         )
 
     def shutdown(self) -> None:
@@ -178,6 +188,11 @@ class Runtime:
             health_handler=self.store.upsert_adapter_health,
         )
         self.telegram.start()
+        self.slack.set_handlers(
+            inbound_handler=self.handle_slack_event,
+            health_handler=self.store.upsert_adapter_health,
+        )
+        self.slack.start()
         if self.job_service is not None:
             self.job_service.start()
         self.background_services_owned = True
@@ -194,6 +209,7 @@ class Runtime:
             self.job_service.stop()
         self._disconnect_mcp_servers()
         self.telegram.stop()
+        self.slack.stop()
         self._reset_transient_state(reason="shutdown")
         self.background_services_owned = False
         self.background_services_started = False
@@ -237,6 +253,45 @@ class Runtime:
                 stream.streamed, stream.transport, result.queued,
                 len(result.reply_text or ""),
             )
+            if stream.streamed:
+                if result.queued:
+                    self.deliver_result(result)
+            else:
+                self.deliver_result(result)
+        else:
+            self.deliver_result(result)
+
+    def handle_slack_event(self, event) -> None:
+        try:
+            asyncio.run(self.async_handle_slack_event(event))
+        except Exception:
+            logger.exception("handle_slack_event crashed for event %s", getattr(event, "message_id", "?"))
+            try:
+                channel_id = getattr(event, "channel_id", "")
+                if channel_id and self.slack.bot_token:
+                    self.slack.send_text(channel_id, "Something went wrong processing your message. Please try again.")
+            except Exception:
+                logger.exception("failed to send slack error reply")
+
+    async def async_handle_slack_event(self, event) -> None:
+        stream: SlackMessageStream | None = None
+        if getattr(event, "adapter", None) == "slack" and self.slack.bot_token:
+            meta = getattr(event, "metadata", {}) or {}
+            thread_ts = meta.get("thread_ts")
+            stream = SlackMessageStream(
+                self.slack,
+                getattr(event, "channel_id", ""),
+                thread_ts=thread_ts,
+            )
+        try:
+            result = await self.gateway.ingest(event, stream_sink=stream)
+        except Exception:
+            logger.exception("gateway.ingest failed for slack event %s", getattr(event, "message_id", "?"))
+            if stream is not None:
+                await stream.finalize()
+            raise
+        if stream is not None:
+            await stream.materialize()
             if stream.streamed:
                 if result.queued:
                     self.deliver_result(result)
@@ -396,6 +451,7 @@ class Runtime:
             "runs": [run.__dict__ if hasattr(run, "__dict__") else run for run in self.store.list_runs(limit=5)],
             "approvals": [approval.__dict__ if hasattr(approval, "__dict__") else approval for approval in self.store.list_pending_approvals()],
             "telegram": self.telegram.status_snapshot(),
+            "slack": self.slack.status_snapshot(),
             "gws": self.gws.status(),
             "mcp": [info.model_dump() for info in self.mcp_registry.list_connected()] if self.mcp_registry else [],
             "workspace": self.workspace.snapshot(),
@@ -711,6 +767,15 @@ class Runtime:
                 last_outbound_at=utc_now().isoformat(),
             )
             return True
+        if adapter == "slack" and self.slack.bot_token:
+            self.slack.send_text(channel_id, text)
+            self.store.upsert_adapter_health(
+                adapter="slack",
+                status="healthy",
+                auth_required=False,
+                last_outbound_at=utc_now().isoformat(),
+            )
+            return True
         if raise_on_unavailable:
             raise RuntimeError(f"adapter unavailable for reminder delivery: {adapter}")
         return False
@@ -833,8 +898,16 @@ def build_runtime(root: Path | None = None) -> Runtime:
         poll_interval=config.telegram.poll_interval,
         reactions_enabled=bool(getattr(config.telegram, "reactions_enabled", True)),
     )
+    slack = SlackAdapter(
+        bot_token=config.slack.bot_token or None,
+        app_token=config.slack.app_token or None,
+        signing_secret=config.slack.signing_secret or None,
+        socket_mode=bool(config.slack.socket_mode),
+        bot_user_id=config.slack.bot_user_id,
+    )
     channel_registry = ChannelRegistry()
     channel_registry.register(TelegramPlugin.create(telegram))
+    channel_registry.register(SlackPlugin.create(slack))
     plugin_registry = PluginRegistry()
     plugin_search_paths = [
         config.paths.root / "plugins",
@@ -897,6 +970,7 @@ def build_runtime(root: Path | None = None) -> Runtime:
         integrations=integrations,
         gateway=gateway,
         telegram=telegram,
+        slack=slack,
         channel_registry=channel_registry,
         plugin_registry=plugin_registry,
         hooks=hooks,

@@ -13,6 +13,7 @@ from .schema import (
     JobsConfig,
     MCPConfig,
     ProviderConfig,
+    SlackConfig,
     TelegramConfig,
 )
 
@@ -23,6 +24,11 @@ CONFIG_FIELDS = [
     "TELEGRAM_POLLING_ENABLED",
     "TELEGRAM_POLL_INTERVAL",
     "TELEGRAM_REACTIONS_ENABLED",
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+    "SLACK_SIGNING_SECRET",
+    "SLACK_SOCKET_MODE",
+    "SLACK_BOT_USER_ID",
     "GWS_ENABLED",
     "GWS_BINARY",
     "GWS_ALLOWED_SERVICES",
@@ -157,6 +163,19 @@ def load_config(root: Path, env: dict[str, str]) -> AppConfig:
         polling_enabled=_env_bool(env, "TELEGRAM_POLLING_ENABLED"),
         poll_interval=_env_float(env, "TELEGRAM_POLL_INTERVAL", 2.0),
         reactions_enabled=_env_bool(env, "TELEGRAM_REACTIONS_ENABLED", True),
+    )
+    slack_app_token = env.get("SLACK_APP_TOKEN", "")
+    slack_socket_mode_raw = env.get("SLACK_SOCKET_MODE", "").strip().lower()
+    if slack_socket_mode_raw:
+        slack_socket_mode: bool | None = slack_socket_mode_raw in {"1", "true", "yes", "on"}
+    else:
+        slack_socket_mode = bool(slack_app_token) or None
+    app.slack = SlackConfig(
+        bot_token=env.get("SLACK_BOT_TOKEN", ""),
+        app_token=slack_app_token,
+        signing_secret=env.get("SLACK_SIGNING_SECRET", ""),
+        socket_mode=slack_socket_mode,
+        bot_user_id=env.get("SLACK_BOT_USER_ID", ""),
     )
     app.gws = GWSConfig(
         enabled=_env_bool(env, "GWS_ENABLED"),

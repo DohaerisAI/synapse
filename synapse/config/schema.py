@@ -14,6 +14,14 @@ class TelegramConfig(BaseModel):
     reactions_enabled: bool = True
 
 
+class SlackConfig(BaseModel):
+    bot_token: str = ""
+    app_token: str = ""
+    signing_secret: str = ""
+    socket_mode: bool | None = None
+    bot_user_id: str = ""
+
+
 class GWSConfig(BaseModel):
     enabled: bool = False
     binary: str = "gws"
@@ -108,6 +116,7 @@ class AppConfig(BaseModel):
     paths: RuntimePaths
     agent: AgentConfig = Field(default_factory=AgentConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    slack: SlackConfig = Field(default_factory=SlackConfig)
     gws: GWSConfig = Field(default_factory=GWSConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)

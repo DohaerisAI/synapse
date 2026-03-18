@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 
@@ -8,7 +9,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -219,6 +220,80 @@ def create_app(runtime: Runtime | None = None, *, root: Path | None = None) -> F
                 last_error=str(error),
             )
         return serialize(result)
+
+    @app.post("/api/adapters/slack/webhook")
+    async def slack_webhook(request: Request) -> dict[str, Any]:
+        body = await request.body()
+        timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+        signature = request.headers.get("X-Slack-Signature", "")
+        if not runtime_instance.slack.verify_signature(timestamp, body, signature):
+            raise HTTPException(status_code=403, detail="invalid Slack signature")
+        try:
+            payload = await request.json()
+        except Exception as error:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from error
+        # URL verification challenge (Slack sends this once when configuring)
+        if payload.get("type") == "url_verification":
+            return {"challenge": payload.get("challenge", "")}
+        try:
+            event = runtime_instance.slack.normalize_event(payload)
+        except ValueError as error:
+            return {"ok": True, "skipped": str(error)}
+        result = await runtime_instance.gateway.ingest(event)
+        try:
+            runtime_instance.deliver_result(result)
+        except Exception as error:
+            runtime_instance.store.upsert_adapter_health(
+                adapter="slack",
+                status="error",
+                auth_required=False,
+                last_error=str(error),
+            )
+        return serialize(result)
+
+    @app.post("/api/adapters/slack/commands")
+    async def slack_slash_command(request: Request) -> dict[str, Any]:
+        """Handle Slack slash commands.
+
+        Returns 200 immediately (Slack requires a response in 3 s) then
+        dispatches processing in the background.
+        """
+        body = await request.body()
+        timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+        signature = request.headers.get("X-Slack-Signature", "")
+        if not runtime_instance.slack.verify_signature(timestamp, body, signature):
+            raise HTTPException(status_code=403, detail="invalid Slack signature")
+        from urllib.parse import parse_qs
+        raw = parse_qs(body.decode("utf-8", errors="replace"))
+        form = {k: v[0] for k, v in raw.items() if v}
+        event = runtime_instance.slack.normalize_slash_command(form)
+
+        async def _dispatch() -> None:
+            result = await runtime_instance.gateway.ingest(event)
+            try:
+                runtime_instance.deliver_result(result)
+            except Exception:
+                pass
+
+        asyncio.create_task(_dispatch())
+        return {"response_type": "in_channel", "text": ""}
+
+    @app.get("/api/adapters")
+    async def list_adapters() -> list[dict[str, Any]]:
+        """Cross-channel health snapshot for all registered channel plugins."""
+        plugins = runtime_instance.channel_registry.list()
+        result = []
+        for plugin in plugins:
+            if plugin.health is not None:
+                health = plugin.health.health_check()
+                result.append({"id": plugin.id, "name": plugin.meta.name, **health.details})
+            else:
+                result.append({"id": plugin.id, "name": plugin.meta.name, "status": "no_health_adapter"})
+        return result
+
+    @app.get("/api/adapters/slack")
+    async def slack_snapshot() -> dict[str, Any]:
+        return runtime_instance.slack.status_snapshot()
 
     @app.post("/api/approvals/{approval_id}/approve")
     async def approve(approval_id: str) -> dict[str, Any]:
