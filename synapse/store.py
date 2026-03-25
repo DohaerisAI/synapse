@@ -79,7 +79,8 @@ class SQLiteStore:
                     finished_at TEXT NOT NULL,
                     duration_ms INTEGER NOT NULL,
                     status TEXT NOT NULL,
-                    error TEXT
+                    error TEXT,
+                    cached_tokens INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_usage_events_started_at ON usage_events(started_at);
                 CREATE INDEX IF NOT EXISTS idx_usage_events_run_id ON usage_events(run_id);
@@ -260,6 +261,11 @@ class SQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_mcp_call_log_created ON mcp_call_log(created_at);
                 """
             )
+            # Migrations for existing databases
+            try:
+                connection.execute("ALTER TABLE usage_events ADD COLUMN cached_tokens INTEGER")
+            except Exception:
+                pass  # Column already exists
 
     def create_run(self, session_key: str, event: NormalizedInboundEvent) -> RunRecord:
         run_id = uuid4().hex
@@ -400,6 +406,7 @@ class SQLiteStore:
         duration_ms: int,
         status: str,
         error: str | None = None,
+        cached_tokens: int | None = None,
     ) -> UsageEventRecord:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -407,9 +414,9 @@ class SQLiteStore:
                 INSERT INTO usage_events (
                     run_id, session_key, provider, model, prompt_tokens, completion_tokens,
                     total_tokens, input_chars, output_chars, started_at, finished_at,
-                    duration_ms, status, error
+                    duration_ms, status, error, cached_tokens
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -426,6 +433,7 @@ class SQLiteStore:
                     duration_ms,
                     status,
                     error,
+                    cached_tokens,
                 ),
             )
             usage_id = int(cursor.lastrowid)
@@ -445,6 +453,7 @@ class SQLiteStore:
             duration_ms=duration_ms,
             status=status,
             error=error,
+            cached_tokens=cached_tokens,
         )
 
     def list_usage_events(
@@ -1694,6 +1703,7 @@ class SQLiteStore:
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
                     "total_tokens": 0,
+                    "cached_tokens": 0,
                     "input_chars": 0,
                     "output_chars": 0,
                     "cost": 0.0,
@@ -1712,6 +1722,7 @@ class SQLiteStore:
             row["prompt_tokens"] += event.prompt_tokens or 0
             row["completion_tokens"] += event.completion_tokens or 0
             row["total_tokens"] += event.total_tokens or ((event.prompt_tokens or 0) + (event.completion_tokens or 0))
+            row["cached_tokens"] += event.cached_tokens or 0
             row["input_chars"] += event.input_chars
             row["output_chars"] += event.output_chars
             cost, unknown = compute_cost(
@@ -1765,6 +1776,7 @@ class SQLiteStore:
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
                     "total_tokens": 0,
+                    "cached_tokens": 0,
                     "input_chars": 0,
                     "output_chars": 0,
                     "cost": 0.0,
@@ -1776,6 +1788,7 @@ class SQLiteStore:
             row["prompt_tokens"] += event.prompt_tokens or 0
             row["completion_tokens"] += event.completion_tokens or 0
             row["total_tokens"] += event.total_tokens or ((event.prompt_tokens or 0) + (event.completion_tokens or 0))
+            row["cached_tokens"] += event.cached_tokens or 0
             row["input_chars"] += event.input_chars
             row["output_chars"] += event.output_chars
             row["error_count"] += 1 if event.status != "ok" else 0
@@ -1805,6 +1818,7 @@ class SQLiteStore:
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            "cached_tokens": 0,
             "input_chars": 0,
             "output_chars": 0,
             "duration_ms": 0,
@@ -1816,6 +1830,7 @@ class SQLiteStore:
             totals["prompt_tokens"] += event.prompt_tokens or 0
             totals["completion_tokens"] += event.completion_tokens or 0
             totals["total_tokens"] += event.total_tokens or ((event.prompt_tokens or 0) + (event.completion_tokens or 0))
+            totals["cached_tokens"] += event.cached_tokens or 0
             totals["input_chars"] += event.input_chars
             totals["output_chars"] += event.output_chars
             totals["duration_ms"] += event.duration_ms
@@ -2013,6 +2028,7 @@ class SQLiteStore:
             duration_ms=int(row["duration_ms"]),
             status=row["status"],
             error=row["error"],
+            cached_tokens=row["cached_tokens"] if "cached_tokens" in row.keys() else None,
         )
 
     def _tool_event_from_row(self, row: sqlite3.Row) -> ToolEventRecord:

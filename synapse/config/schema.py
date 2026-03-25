@@ -34,7 +34,7 @@ class ProviderConfig(BaseModel):
     azure_api_key: str = ""
     azure_model: str = "gpt-5.2-chat"
     azure_deployment: str = ""
-    azure_api_version: str = "2024-10-21"
+    azure_api_version: str = "2024-12-01-preview"
     codex_model: str = "gpt-5.4"
     codex_auth_file: str = ""
     codex_transport: str = ""

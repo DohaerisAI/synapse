@@ -208,16 +208,30 @@ class MemoryStore:
         return entries[-limit:]
 
     def context_bundle(self, session_key: str, user_id: str, *, transcript_limit: int = 15) -> str:
+        """Assemble memory context for the LLM system prompt.
+
+        Sections are ordered most-stable → most-volatile so that
+        provider-side prompt caching (prefix matching) gets maximum hits.
+        """
         sections: list[str] = []
+        # --- Stable prefix (rarely changes) ---
+        global_memory = self.read_global_memory().strip()
+        if global_memory:
+            sections.append("## Global Memory\n" + global_memory)
+        skill_ops = self.read_skill_operations().strip()
+        if skill_ops:
+            sections.append("## Skill Operations\n" + skill_ops)
         user_memory = self.read_user_memory(user_id).strip()
         if user_memory:
             sections.append("## User Memory\n" + user_memory)
-        session_notes = self.read_session_notes(session_key).strip()
-        if session_notes:
-            sections.append("## Session Notes\n" + session_notes)
+        # --- Semi-stable (changes on compaction / occasionally) ---
         session_summary = self.read_session_summary(session_key).strip()
         if session_summary:
             sections.append("## Session Summary\n" + session_summary)
+        session_notes = self.read_session_notes(session_key).strip()
+        if session_notes:
+            sections.append("## Session Notes\n" + session_notes)
+        # --- Volatile (changes per-turn) ---
         current_task = self.read_current_task(session_key)
         if current_task:
             sections.append("## Current Task\n" + json.dumps(current_task, ensure_ascii=True, indent=2))
@@ -231,12 +245,6 @@ class MemoryStore:
                     transcript_lines.append(f"{role}: {content}")
             if transcript_lines:
                 sections.append("## Recent Transcript\n" + "\n".join(transcript_lines))
-        global_memory = self.read_global_memory().strip()
-        if global_memory:
-            sections.append("## Global Memory\n" + global_memory)
-        skill_ops = self.read_skill_operations().strip()
-        if skill_ops:
-            sections.append("## Skill Operations\n" + skill_ops)
         return "\n\n".join(sections)
 
     def token_estimate(self, session_key: str) -> int:

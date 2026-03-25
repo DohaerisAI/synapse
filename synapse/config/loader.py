@@ -191,7 +191,7 @@ def load_config(root: Path, env: dict[str, str]) -> AppConfig:
         azure_api_key=env.get("AZURE_OPENAI_API_KEY", ""),
         azure_model=env.get("AZURE_OPENAI_MODEL", "gpt-5.2-chat"),
         azure_deployment=env.get("AZURE_OPENAI_DEPLOYMENT", ""),
-        azure_api_version=env.get("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+        azure_api_version=env.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
         custom_base_url=env.get("CUSTOM_API_BASE_URL", ""),
         custom_api_key=env.get("CUSTOM_API_KEY", ""),
         custom_model=env.get("CUSTOM_API_MODEL", ""),

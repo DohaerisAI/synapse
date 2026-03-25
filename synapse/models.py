@@ -214,6 +214,7 @@ class UsageEventRecord(BaseModel):
     duration_ms: int
     status: str
     error: str | None = None
+    cached_tokens: int | None = None
 
 
 class ToolEventRecord(BaseModel):

@@ -39,16 +39,23 @@ class ModelProvider(Protocol):
         ...
 
 
-def _usage_numbers(usage: dict[str, Any] | None) -> tuple[int | None, int | None, int | None]:
+def _usage_numbers(usage: dict[str, Any] | None) -> tuple[int | None, int | None, int | None, int | None]:
     if not isinstance(usage, dict):
-        return None, None, None
+        return None, None, None, None
     prompt_tokens = usage.get("prompt_tokens")
     completion_tokens = usage.get("completion_tokens")
     total_tokens = usage.get("total_tokens")
+    cached_tokens = None
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        cached_tokens = details.get("cached_tokens")
+    if cached_tokens is None:
+        cached_tokens = usage.get("cached_tokens")
     return (
         int(prompt_tokens) if isinstance(prompt_tokens, int) else None,
         int(completion_tokens) if isinstance(completion_tokens, int) else None,
         int(total_tokens) if isinstance(total_tokens, int) else None,
+        int(cached_tokens) if isinstance(cached_tokens, int) else None,
     )
 
 
@@ -69,7 +76,7 @@ def _record_usage_event(
 ) -> None:
     if store is None:
         return
-    prompt_tokens, completion_tokens, total_tokens = _usage_numbers(usage)
+    prompt_tokens, completion_tokens, total_tokens, cached_tokens = _usage_numbers(usage)
     store.append_usage_event(
         run_id=run_id,
         session_key=session_key,
@@ -78,6 +85,7 @@ def _record_usage_event(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
+        cached_tokens=cached_tokens,
         input_chars=input_chars,
         output_chars=output_chars,
         started_at=started_at,
