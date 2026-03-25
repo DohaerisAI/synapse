@@ -38,6 +38,9 @@ class ProviderConfig(BaseModel):
     codex_model: str = "gpt-5.4"
     codex_auth_file: str = ""
     codex_transport: str = ""
+    custom_base_url: str = ""
+    custom_api_key: str = ""
+    custom_model: str = ""
 
 
 class AgentConfig(BaseModel):

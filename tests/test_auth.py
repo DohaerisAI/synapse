@@ -353,3 +353,83 @@ async def test_model_router_falls_back_to_codex_cli_when_direct_transport_fails(
     result = await router.generate([{"role": "user", "content": "say ok"}], system_prompt="be exact")
 
     assert result == "ok from cli"
+
+
+# ---------------------------------------------------------------------------
+# Custom API provider tests
+# ---------------------------------------------------------------------------
+
+
+def test_auth_store_loads_custom_profile_from_env(tmp_path):
+    """Custom API env vars produce a provider='custom' profile."""
+    env = {
+        "CUSTOM_API_BASE_URL": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "CUSTOM_API_KEY": "test-key-123",
+        "CUSTOM_API_MODEL": "gemini-2.0-flash",
+    }
+    store = AuthStore(tmp_path / "auth.json", tmp_path / "config.json", env=env)
+    profile = store.load_custom_profile()
+    assert profile is not None
+    assert profile.provider == "custom"
+    assert profile.model == "gemini-2.0-flash"
+    assert profile.settings["base_url"] == "https://generativelanguage.googleapis.com/v1beta/openai"
+    assert profile.settings["api_key"] == "test-key-123"
+    assert profile.settings["transport"] == "chat"
+
+
+def test_auth_store_custom_requires_base_url_and_key(tmp_path):
+    """Returns None when base_url or api_key missing."""
+    store1 = AuthStore(tmp_path / "a.json", tmp_path / "c.json", env={"CUSTOM_API_BASE_URL": "http://x"})
+    assert store1.load_custom_profile() is None
+    store2 = AuthStore(tmp_path / "a.json", tmp_path / "c.json", env={"CUSTOM_API_KEY": "k"})
+    assert store2.load_custom_profile() is None
+
+
+def test_auth_store_custom_defaults_transport_to_chat(tmp_path):
+    """Transport defaults to 'chat' when CODEX_TRANSPORT is unset."""
+    env = {"CUSTOM_API_BASE_URL": "http://x", "CUSTOM_API_KEY": "k", "CUSTOM_API_MODEL": "m"}
+    store = AuthStore(tmp_path / "a.json", tmp_path / "c.json", env=env)
+    profile = store.load_custom_profile()
+    assert profile.settings["transport"] == "chat"
+
+
+def test_auth_store_custom_respects_codex_transport(tmp_path):
+    """CODEX_TRANSPORT=responses is respected."""
+    env = {"CUSTOM_API_BASE_URL": "http://x", "CUSTOM_API_KEY": "k", "CUSTOM_API_MODEL": "m", "CODEX_TRANSPORT": "responses"}
+    store = AuthStore(tmp_path / "a.json", tmp_path / "c.json", env=env)
+    profile = store.load_custom_profile()
+    assert profile.settings["transport"] == "responses"
+
+
+def test_auth_store_resolve_prefers_azure_over_custom(tmp_path):
+    """Azure env vars take priority over custom env vars."""
+    env = {
+        "AZURE_OPENAI_API_KEY": "az-key",
+        "AZURE_OPENAI_ENDPOINT": "https://az.openai.azure.com",
+        "CUSTOM_API_BASE_URL": "http://custom",
+        "CUSTOM_API_KEY": "custom-key",
+        "CUSTOM_API_MODEL": "gemini",
+    }
+    # Pass home=tmp_path to prevent reading real ~/.codex/auth.json
+    store = AuthStore(tmp_path / "a.json", tmp_path / "c.json", env=env, home=tmp_path)
+    profile = store.resolve()
+    assert profile.provider == "azure-openai"
+
+
+def test_auth_store_resolve_uses_custom_when_no_other(tmp_path):
+    """Custom is resolved when no codex or azure profiles exist."""
+    env = {"CUSTOM_API_BASE_URL": "http://x", "CUSTOM_API_KEY": "k", "CUSTOM_API_MODEL": "m"}
+    # Pass home=tmp_path to prevent reading real ~/.codex/auth.json
+    store = AuthStore(tmp_path / "a.json", tmp_path / "c.json", env=env, home=tmp_path)
+    profile = store.resolve()
+    assert profile is not None
+    assert profile.provider == "custom"
+
+
+def test_auth_store_health_view_shows_custom(tmp_path):
+    """health_view includes custom_api source."""
+    env = {"CUSTOM_API_BASE_URL": "http://x", "CUSTOM_API_KEY": "k"}
+    store = AuthStore(tmp_path / "a.json", tmp_path / "c.json", env=env)
+    view = store.health_view()
+    assert "custom_api" in view["sources"]
+    assert view["sources"]["custom_api"]["available"] is True

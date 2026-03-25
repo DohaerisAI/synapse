@@ -926,6 +926,9 @@ class ModelRouter:
             if str(profile.settings.get("transport", "responses")).strip().lower() == "cli":
                 return CodexCliProvider(profile, client=self.client, workdir=self.workdir, store=self.store)
             return OpenAICodexResponsesProvider(profile, client=self.client, store=self.store)
+        if profile.provider == "custom":
+            from .providers_chat import ChatCompletionsProvider
+            return ChatCompletionsProvider(profile, client=self.client, store=self.store)
         raise ValueError(f"unsupported provider: {profile.provider}")
 
     def _fallback_provider_for(self, profile: AuthProfile) -> Any | None:

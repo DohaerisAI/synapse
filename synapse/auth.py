@@ -89,6 +89,26 @@ class AuthStore:
             },
         )
 
+    def load_custom_profile(self) -> AuthProfile | None:
+        base_url = self.env.get("CUSTOM_API_BASE_URL", "").strip()
+        api_key = self.env.get("CUSTOM_API_KEY", "").strip()
+        model = self.env.get("CUSTOM_API_MODEL", "").strip()
+        if not base_url or not api_key:
+            return None
+        transport = self.env.get("CODEX_TRANSPORT", "chat").strip().lower()
+        if transport not in {"chat", "responses"}:
+            transport = "chat"
+        return AuthProfile(
+            provider="custom",
+            model=model or "default",
+            source="environment",
+            settings={
+                "base_url": base_url,
+                "api_key": api_key,
+                "transport": transport,
+            },
+        )
+
     def load_fallback_profile(self) -> AuthProfile | None:
         if not self.fallback_config_path.exists():
             return None
@@ -114,6 +134,9 @@ class AuthStore:
         env_profile = self.load_env_profile()
         if env_profile is not None:
             return env_profile
+        custom = self.load_custom_profile()
+        if custom is not None:
+            return custom
         return self.load_fallback_profile()
 
     def health_view(self) -> dict[str, Any]:
@@ -121,6 +144,7 @@ class AuthStore:
         codex_candidates = self._codex_auth_candidates()
         codex_profile = self.load_codex_cli_profile()
         env_profile = self.load_env_profile()
+        custom_profile = self.load_custom_profile()
         fallback_profile = self.load_fallback_profile()
         resolved = self.resolve()
         return {
@@ -146,6 +170,11 @@ class AuthStore:
                     "available": env_profile is not None,
                     "endpoint_configured": "AZURE_OPENAI_ENDPOINT" in self.env,
                     "api_key_configured": "AZURE_OPENAI_API_KEY" in self.env,
+                },
+                "custom_api": {
+                    "available": custom_profile is not None,
+                    "base_url_configured": bool(self.env.get("CUSTOM_API_BASE_URL", "").strip()),
+                    "api_key_configured": bool(self.env.get("CUSTOM_API_KEY", "").strip()),
                 },
                 "config_fallback": {
                     "available": fallback_profile is not None,
